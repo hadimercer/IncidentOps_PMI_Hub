@@ -261,3 +261,94 @@ ORDER BY
     vcs.escalation_count DESC,
     vcs.cycle_hours DESC
 LIMIT 200;
+
+CREATE OR REPLACE VIEW im.v_closure_compliance AS
+WITH last_close AS (
+    SELECT
+        er.case_id,
+        MAX(er.ts) AS last_close_ts
+    FROM im.event_raw er
+    WHERE er.event = 'Ticket closed'
+    GROUP BY er.case_id
+),
+first_reopen_after_close AS (
+    SELECT
+        lc.case_id,
+        MIN(er.ts) AS first_reopen_ts_after_close
+    FROM last_close lc
+    JOIN im.event_raw er
+        ON er.case_id = lc.case_id
+    WHERE er.event ILIKE '%reopen%'
+      AND er.ts > lc.last_close_ts
+    GROUP BY lc.case_id
+)
+SELECT
+    vcs.case_id,
+    vcs.variant,
+    vcs.priority,
+    vcs.issue_type,
+    vcs.report_channel,
+    vcs.cycle_hours,
+    vcs.customer_satisfaction,
+    vcs.met_sla,
+    vcs.has_feedback,
+    vcs.has_reopen,
+    vcs.has_reject,
+    NOT COALESCE(vcs.has_feedback, FALSE) AS closed_without_feedback,
+    EXTRACT(EPOCH FROM (fr.first_reopen_ts_after_close - lc.last_close_ts)) / 3600.0 AS reopen_after_close_hours,
+    (
+        EXTRACT(EPOCH FROM (fr.first_reopen_ts_after_close - lc.last_close_ts)) / 3600.0
+    ) IS NOT NULL
+    AND (
+        EXTRACT(EPOCH FROM (fr.first_reopen_ts_after_close - lc.last_close_ts)) / 3600.0
+    ) <= 3 AS reopened_within_3h,
+    (
+        EXTRACT(EPOCH FROM (fr.first_reopen_ts_after_close - lc.last_close_ts)) / 3600.0
+    ) IS NOT NULL
+    AND (
+        EXTRACT(EPOCH FROM (fr.first_reopen_ts_after_close - lc.last_close_ts)) / 3600.0
+    ) <= 24 AS reopened_within_24h
+FROM im.v_case_sla vcs
+LEFT JOIN last_close lc
+    ON lc.case_id = vcs.case_id
+LEFT JOIN first_reopen_after_close fr
+    ON fr.case_id = vcs.case_id;
+
+CREATE OR REPLACE VIEW im.v_cx_summary AS
+SELECT
+    COUNT(*) AS cases,
+    AVG(vcc.customer_satisfaction) AS avg_csat,
+    AVG(
+        CASE
+            WHEN vcc.met_sla IS TRUE THEN 1.0
+            WHEN vcc.met_sla IS FALSE THEN 0.0
+            ELSE NULL
+        END
+    ) AS met_sla_rate,
+    AVG(CASE WHEN vcc.closed_without_feedback THEN 1.0 ELSE 0.0 END) AS closed_without_feedback_rate,
+    AVG(CASE WHEN vcc.reopened_within_3h THEN 1.0 ELSE 0.0 END) AS reopened_within_3h_rate,
+    AVG(CASE WHEN vcc.reopened_within_24h THEN 1.0 ELSE 0.0 END) AS reopened_within_24h_rate,
+    AVG(CASE WHEN vcc.has_reject THEN 1.0 ELSE 0.0 END) AS reject_rate,
+    AVG(vcc.cycle_hours) AS avg_cycle_hours,
+    percentile_cont(0.9) WITHIN GROUP (ORDER BY vcc.cycle_hours) AS p90_cycle_hours
+FROM im.v_closure_compliance vcc;
+
+CREATE OR REPLACE VIEW im.v_cx_breakdown AS
+SELECT
+    vcc.issue_type,
+    vcc.priority,
+    COUNT(*) AS cases,
+    AVG(vcc.customer_satisfaction) AS avg_csat,
+    AVG(
+        CASE
+            WHEN vcc.met_sla IS TRUE THEN 1.0
+            WHEN vcc.met_sla IS FALSE THEN 0.0
+            ELSE NULL
+        END
+    ) AS met_sla_rate,
+    AVG(CASE WHEN vcc.closed_without_feedback THEN 1.0 ELSE 0.0 END) AS closed_without_feedback_rate,
+    AVG(CASE WHEN vcc.reopened_within_3h THEN 1.0 ELSE 0.0 END) AS reopened_within_3h_rate,
+    AVG(CASE WHEN vcc.has_reject THEN 1.0 ELSE 0.0 END) AS reject_rate,
+    AVG(vcc.cycle_hours) AS avg_cycle_hours
+FROM im.v_closure_compliance vcc
+GROUP BY vcc.issue_type, vcc.priority;
