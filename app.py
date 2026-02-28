@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
+import time
 from typing import Optional
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import pandas as pd
 import plotly.express as px
@@ -581,43 +582,93 @@ def build_sankey(transitions: pd.DataFrame, title: str, max_rows: int, height: i
     return fig
 
 
-def get_db_url() -> Optional[str]:
-    load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env")
+def normalize_neon_url(url: str) -> str:
+    parsed = urlparse(url)
+    hostname = parsed.hostname or ""
+    if not hostname.startswith("ep-"):
+        return url
 
-    db_url = os.getenv("DATABASE_URL_POOLED") or os.getenv("DATABASE_URL_DIRECT")
+    if "options=endpoint%3D" in parsed.query or "options=endpoint=" in parsed.query:
+        return url
+
+    endpoint_id = hostname.removesuffix("-pooler")
+    query_params = parse_qsl(parsed.query, keep_blank_values=True)
+    query_params.append(("options", f"endpoint={endpoint_id}"))
+    updated_query = urlencode(query_params, doseq=True)
+    return urlunparse(parsed._replace(query=updated_query))
+
+
+def get_db_url() -> Optional[str]:
+    load_dotenv()
+
+    db_url = os.getenv("DATABASE_URL_POOLED")
+    if not db_url:
+        db_url = os.getenv("DATABASE_URL_DIRECT")
     if db_url:
-        return db_url
+        return normalize_neon_url(db_url)
 
     try:
         db_url = st.secrets["DATABASE_URL_POOLED"]
     except Exception:
         db_url = None
     if db_url:
-        return db_url
+        return normalize_neon_url(str(db_url))
 
     try:
         db_url = st.secrets["DATABASE_URL_DIRECT"]
     except Exception:
         db_url = None
 
-    return db_url or None
+    return normalize_neon_url(str(db_url)) if db_url else None
+
+
+def connect_db(url: str):
+    wait_seconds = [0.5, 1.0, 2.0, 4.0, 4.0]
+    last_exception: Optional[Exception] = None
+
+    for attempt, wait_time in enumerate(wait_seconds):
+        try:
+            return psycopg2.connect(
+                url,
+                connect_timeout=10,
+                application_name="incidentops_pmi_hub",
+            )
+        except (psycopg2.OperationalError, psycopg2.InterfaceError) as exc:
+            last_exception = exc
+            if attempt == len(wait_seconds) - 1:
+                break
+            time.sleep(wait_time)
+
+    if last_exception is not None:
+        raise last_exception
+    raise RuntimeError("Unable to connect to database.")
 
 
 @st.cache_resource(show_spinner=False)
 def get_connection(db_url: str):
-    return psycopg2.connect(db_url)
+    return connect_db(db_url)
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def run_query(db_url: str, sql: str) -> pd.DataFrame:
-    conn = get_connection(db_url)
-    return pd.read_sql_query(sql, conn)
-
-
-@st.cache_data(ttl=300, show_spinner=False)
-def run_query_params(db_url: str, sql: str, params: tuple[object, ...]) -> pd.DataFrame:
+def _run_query_cached(
+    db_url: str, sql: str, params: Optional[tuple[object, ...]] = None
+) -> pd.DataFrame:
     conn = get_connection(db_url)
     return pd.read_sql_query(sql, conn, params=params)
+
+
+def run_query(sql: str, params: Optional[tuple[object, ...]] = None) -> pd.DataFrame:
+    db_url = get_db_url()
+    if not db_url:
+        raise RuntimeError("Database URL is not configured.")
+
+    try:
+        return _run_query_cached(db_url, sql, params=params)
+    except (psycopg2.OperationalError, psycopg2.InterfaceError):
+        get_connection.clear()
+        _run_query_cached.clear()
+        conn = get_connection(db_url)
+        return pd.read_sql_query(sql, conn, params=params)
 
 
 def render_coming_soon(page_name: str) -> None:
@@ -629,9 +680,9 @@ def render_executive_overview(db_url: str) -> None:
     header("Executive Overview", "Cross-case operational KPIs and variant performance.")
 
     try:
-        kpi_df = run_query(db_url, KPI_SQL)
-        variant_df = run_query(db_url, VARIANT_SQL)
-        range_df = run_query(db_url, RANGE_SQL)
+        kpi_df = run_query(KPI_SQL)
+        variant_df = run_query(VARIANT_SQL)
+        range_df = run_query(RANGE_SQL)
     except Exception as exc:
         st.error(f"Failed to query dashboard views: {exc}")
         st.stop()
@@ -751,10 +802,10 @@ def render_process_explorer(db_url: str) -> None:
     header("Process Explorer", "Variant and transition flow analytics across the incident lifecycle.")
 
     try:
-        variant_df = run_query(db_url, VARIANT_SQL)
-        transition_df = run_query(db_url, TRANSITION_SUMMARY_SQL)
-        variant_transition_df = run_query(db_url, TRANSITION_BY_VARIANT_SQL)
-        dwell_df = run_query(db_url, DWELL_SQL)
+        variant_df = run_query(VARIANT_SQL)
+        transition_df = run_query(TRANSITION_SUMMARY_SQL)
+        variant_transition_df = run_query(TRANSITION_BY_VARIANT_SQL)
+        dwell_df = run_query(DWELL_SQL)
     except Exception as exc:
         st.error(f"Failed to query process explorer views: {exc}")
         st.stop()
@@ -910,8 +961,8 @@ def render_bottlenecks(db_url: str) -> None:
     st.caption("Transition time = delay between specific handoffs.")
 
     try:
-        dwell_df = run_query(db_url, DWELL_SQL)
-        transition_df = run_query(db_url, TRANSITION_SUMMARY_SQL)
+        dwell_df = run_query(DWELL_SQL)
+        transition_df = run_query(TRANSITION_SUMMARY_SQL)
     except Exception as exc:
         st.error(f"Failed to query bottleneck views: {exc}")
         st.stop()
@@ -1099,11 +1150,11 @@ def render_escalations_handoffs(db_url: str) -> None:
     st.caption("Ping-pong = level 2 <-> level 3 bouncing inferred from event transitions")
 
     try:
-        handoff_df = run_query(db_url, HANDOFF_SUMMARY_SQL)
-        pingpong_df = run_query(db_url, PINGPONG_CASES_SQL)
-        worst_df = run_query(db_url, WORST_HANDOFF_SQL)
-        pingpong_kpi_df = run_query(db_url, PINGPONG_KPI_SQL)
-        overall_kpi_df = run_query(db_url, OVERALL_HANDOFF_BASELINE_SQL)
+        handoff_df = run_query(HANDOFF_SUMMARY_SQL)
+        pingpong_df = run_query(PINGPONG_CASES_SQL)
+        worst_df = run_query(WORST_HANDOFF_SQL)
+        pingpong_kpi_df = run_query(PINGPONG_KPI_SQL)
+        overall_kpi_df = run_query(OVERALL_HANDOFF_BASELINE_SQL)
     except Exception as exc:
         st.error(f"Failed to query escalation/handoff views: {exc}")
         st.stop()
@@ -1374,9 +1425,9 @@ def render_quality_cx(db_url: str) -> None:
     header("Quality & CX", "Track closure quality, feedback coverage, and reopen-after-close outcomes.")
 
     try:
-        cx_summary_df = run_query(db_url, CX_SUMMARY_SQL)
-        cx_breakdown_df = run_query(db_url, CX_BREAKDOWN_SQL)
-        closure_df = run_query(db_url, CLOSURE_COMPLIANCE_SQL)
+        cx_summary_df = run_query(CX_SUMMARY_SQL)
+        cx_breakdown_df = run_query(CX_BREAKDOWN_SQL)
+        closure_df = run_query(CLOSURE_COMPLIANCE_SQL)
     except Exception as exc:
         st.error(f"Failed to query quality/CX views: {exc}")
         st.stop()
@@ -1729,8 +1780,8 @@ def render_problem_candidates(db_url: str) -> None:
     header("Problem Candidates", "Rank recurring clusters for prevention backlog planning and evidence-based drilldown.")
 
     try:
-        backlog_df = run_query(db_url, PROBLEM_CANDIDATES_SQL)
-        top_cases_df = run_query(db_url, PROBLEM_TOP_CASES_SQL)
+        backlog_df = run_query(PROBLEM_CANDIDATES_SQL)
+        top_cases_df = run_query(PROBLEM_TOP_CASES_SQL)
     except Exception as exc:
         st.error(f"Failed to query problem-candidate views: {exc}")
         st.stop()
@@ -1887,8 +1938,7 @@ def render_problem_candidates(db_url: str) -> None:
                 st.info("Select a candidate in Backlog to load drilldown cases.")
             else:
                 try:
-                    drill_df = run_query_params(
-                        db_url,
+                    drill_df = run_query(
                         PROBLEM_CASES_BY_CANDIDATE_SQL,
                         params=(selected_issue_type, selected_norm),
                     )
@@ -2024,8 +2074,8 @@ def render_channel_intake(db_url: str) -> None:
     header("Channel & Intake", "Compare intake channel effectiveness and identify problematic channel+issue combinations.")
 
     try:
-        channel_df = run_query(db_url, CHANNEL_SUMMARY_SQL)
-        channel_issue_df = run_query(db_url, CHANNEL_ISSUE_SUMMARY_SQL)
+        channel_df = run_query(CHANNEL_SUMMARY_SQL)
+        channel_issue_df = run_query(CHANNEL_ISSUE_SUMMARY_SQL)
     except Exception as exc:
         st.error(f"Failed to query channel/intake views: {exc}")
         st.stop()
@@ -2385,10 +2435,10 @@ def render_knowledge_fcr(db_url: str) -> None:
     header("Knowledge & FCR", "Analyze FCR proxy performance and prioritize knowledge/training enablement opportunities.")
 
     try:
-        overview_df = run_query(db_url, FCR_OVERVIEW_SQL)
-        level_dist_df = run_query(db_url, FCR_LEVEL_DIST_SQL)
-        fcr_summary_df = run_query(db_url, FCR_SUMMARY_SQL)
-        kb_df = run_query(db_url, KB_ENABLEMENT_SQL)
+        overview_df = run_query(FCR_OVERVIEW_SQL)
+        level_dist_df = run_query(FCR_LEVEL_DIST_SQL)
+        fcr_summary_df = run_query(FCR_SUMMARY_SQL)
+        kb_df = run_query(KB_ENABLEMENT_SQL)
     except Exception as exc:
         st.error(f"Failed to query knowledge/FCR views: {exc}")
         st.stop()
@@ -2572,8 +2622,7 @@ def render_knowledge_fcr(db_url: str) -> None:
             )
 
             try:
-                drill_df = run_query_params(
-                    db_url,
+                drill_df = run_query(
                     FCR_CASES_BY_ISSUE_SQL,
                     params=(selected_issue,),
                 )
@@ -2703,8 +2752,7 @@ def render_knowledge_fcr(db_url: str) -> None:
         selected_issue_for_export = st.session_state.get("kfcr_issue_type", default_issue_type)
         if selected_issue_for_export:
             try:
-                export_cases_df = run_query_params(
-                    db_url,
+                export_cases_df = run_query(
                     FCR_CASES_BY_ISSUE_SQL,
                     params=(selected_issue_for_export,),
                 )
@@ -2751,14 +2799,14 @@ def main() -> None:
     db_url = get_db_url()
     if not db_url:
         st.warning(
-            "Set DATABASE_URL_POOLED or DATABASE_URL_DIRECT in .env, or add them to Streamlit secrets, to load dashboard data."
+            "Database config missing. Set DATABASE_URL_POOLED (preferred) or DATABASE_URL_DIRECT in .env or Streamlit secrets."
         )
         st.stop()
 
     try:
         get_connection(db_url)
     except Exception as exc:
-        st.error(f"Database connection failed: {exc}")
+        st.error(f"DB connection failed; check secrets and Neon endpoint status. {exc}")
         st.stop()
 
     if page == "Executive Overview":
@@ -2783,3 +2831,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
