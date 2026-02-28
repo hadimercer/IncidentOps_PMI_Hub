@@ -506,3 +506,106 @@ SELECT
     1.0 - AVG(CASE WHEN vcs.has_feedback THEN 1.0 ELSE 0.0 END) AS missing_feedback_rate
 FROM im.v_case_sla vcs
 GROUP BY vcs.report_channel, vcs.issue_type;
+
+CREATE OR REPLACE VIEW im.v_resolution_level AS
+WITH event_flags AS (
+    SELECT
+        er.case_id,
+        BOOL_OR(er.event = 'Ticket solved by level 1 support') AS solved_l1,
+        BOOL_OR(er.event = 'Ticket solved by level 2 support') AS solved_l2,
+        BOOL_OR(er.event = 'Ticket solved by level 3 support') AS solved_l3,
+        BOOL_OR(er.event = 'Ticket reopened by customer') AS reopened,
+        BOOL_OR(
+            er.event IN (
+                'Ticket escalated to level 2 support',
+                'Level 1 escalates to level 2 support',
+                'Ticket assigned to level 2 support'
+            )
+        ) AS escalated_to_l2,
+        BOOL_OR(er.event = 'Level 2 escalates to level 3 support') AS escalated_to_l3
+    FROM im.event_raw er
+    GROUP BY er.case_id
+)
+SELECT
+    vcs.case_id,
+    COALESCE(ef.solved_l1, FALSE) AS solved_l1,
+    COALESCE(ef.solved_l2, FALSE) AS solved_l2,
+    COALESCE(ef.solved_l3, FALSE) AS solved_l3,
+    COALESCE(ef.reopened, FALSE) AS reopened,
+    COALESCE(ef.escalated_to_l2, FALSE) AS escalated_to_l2,
+    COALESCE(ef.escalated_to_l3, FALSE) AS escalated_to_l3,
+    CASE
+        WHEN COALESCE(ef.solved_l3, FALSE) THEN 'L3'
+        WHEN COALESCE(ef.solved_l2, FALSE) THEN 'L2'
+        WHEN COALESCE(ef.solved_l1, FALSE) THEN 'L1'
+        ELSE 'Unknown'
+    END AS resolution_level
+FROM im.v_case_sla vcs
+LEFT JOIN event_flags ef
+    ON ef.case_id = vcs.case_id;
+
+CREATE OR REPLACE VIEW im.v_fcr_cases AS
+SELECT
+    vcs.case_id,
+    vcs.variant,
+    vcs.priority,
+    vcs.issue_type,
+    vcs.report_channel,
+    vcs.cycle_hours,
+    vcs.customer_satisfaction,
+    vcs.met_sla,
+    vrl.resolution_level,
+    (
+        vrl.solved_l1
+        AND NOT vrl.reopened
+        AND NOT vrl.escalated_to_l2
+        AND NOT vrl.escalated_to_l3
+    ) AS fcr
+FROM im.v_case_sla vcs
+JOIN im.v_resolution_level vrl
+    ON vrl.case_id = vcs.case_id;
+
+CREATE OR REPLACE VIEW im.v_fcr_summary AS
+SELECT
+    vfc.issue_type,
+    COUNT(*) AS cases,
+    AVG(CASE WHEN vfc.fcr THEN 1.0 ELSE 0.0 END) AS fcr_rate,
+    AVG(vfc.cycle_hours) AS avg_cycle_hours,
+    AVG(vfc.customer_satisfaction) AS avg_csat,
+    AVG(
+        CASE
+            WHEN vfc.met_sla IS TRUE THEN 1.0
+            WHEN vfc.met_sla IS FALSE THEN 0.0
+            ELSE NULL
+        END
+    ) AS met_sla_rate,
+    AVG(CASE WHEN vrl.reopened THEN 1.0 ELSE 0.0 END) AS reopen_rate,
+    AVG(CASE WHEN vrl.escalated_to_l2 THEN 1.0 ELSE 0.0 END) AS l2_escalation_rate,
+    AVG(CASE WHEN vrl.escalated_to_l3 THEN 1.0 ELSE 0.0 END) AS l3_escalation_rate
+FROM im.v_fcr_cases vfc
+JOIN im.v_resolution_level vrl
+    ON vrl.case_id = vfc.case_id
+GROUP BY vfc.issue_type;
+
+CREATE OR REPLACE VIEW im.v_kb_enablement_candidates AS
+SELECT
+    vfc.issue_type,
+    COUNT(*) AS cases,
+    AVG(CASE WHEN vrl.resolution_level = 'L1' THEN 1.0 ELSE 0.0 END) AS l1_solved_rate,
+    AVG(CASE WHEN vrl.resolution_level IN ('L2', 'L3') THEN 1.0 ELSE 0.0 END) AS l2_or_l3_rate,
+    AVG(CASE WHEN vrl.escalated_to_l2 THEN 1.0 ELSE 0.0 END) AS escalation_to_l2_rate,
+    AVG(CASE WHEN vrl.reopened THEN 1.0 ELSE 0.0 END) AS reopen_rate,
+    AVG(vfc.cycle_hours) AS avg_cycle_hours,
+    AVG(vfc.customer_satisfaction) AS avg_csat,
+    (
+        COUNT(*)
+        * (
+            AVG(CASE WHEN vrl.resolution_level IN ('L2', 'L3') THEN 1.0 ELSE 0.0 END)
+            + AVG(CASE WHEN vrl.escalated_to_l2 THEN 1.0 ELSE 0.0 END)
+        )
+        * (AVG(vfc.cycle_hours) / 10.0)
+    ) AS enablement_score
+FROM im.v_fcr_cases vfc
+JOIN im.v_resolution_level vrl
+    ON vrl.case_id = vfc.case_id
+GROUP BY vfc.issue_type;
