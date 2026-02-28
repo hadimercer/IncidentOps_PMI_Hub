@@ -139,3 +139,45 @@ SELECT
     AVG(vcs.resolver_changes::double precision) AS avg_resolver_changes
 FROM im.v_case_sla vcs
 GROUP BY vcs.variant;
+
+CREATE OR REPLACE VIEW im.v_transition_summary AS
+SELECT
+    ves.event AS from_event,
+    ves.next_event AS to_event,
+    COUNT(*) AS transition_count,
+    AVG(ves.delta_hours) AS avg_delta_hours,
+    percentile_cont(0.5) WITHIN GROUP (ORDER BY ves.delta_hours) AS median_delta_hours,
+    percentile_cont(0.9) WITHIN GROUP (ORDER BY ves.delta_hours) AS p90_delta_hours
+FROM im.v_event_seq ves
+WHERE ves.next_ts IS NOT NULL
+  AND ves.next_event IS NOT NULL
+  AND ves.delta_hours IS NOT NULL
+  AND ves.delta_hours >= 0
+GROUP BY ves.event, ves.next_event;
+
+CREATE OR REPLACE VIEW im.v_dwell_by_event AS
+SELECT
+    ves.event,
+    COUNT(*) AS occurrences,
+    AVG(ves.delta_hours) AS avg_dwell_hours,
+    percentile_cont(0.5) WITHIN GROUP (ORDER BY ves.delta_hours) AS median_dwell_hours,
+    percentile_cont(0.9) WITHIN GROUP (ORDER BY ves.delta_hours) AS p90_dwell_hours
+FROM im.v_event_seq ves
+WHERE ves.next_ts IS NOT NULL
+  AND ves.delta_hours IS NOT NULL
+  AND ves.delta_hours >= 0
+GROUP BY ves.event;
+
+CREATE OR REPLACE VIEW im.v_transition_by_variant AS
+SELECT
+    ves.variant,
+    ves.event AS from_event,
+    ves.next_event AS to_event,
+    COUNT(*) AS transition_count,
+    AVG(ves.delta_hours) AS avg_delta_hours
+FROM im.v_event_seq ves
+WHERE ves.next_ts IS NOT NULL
+  AND ves.next_event IS NOT NULL
+  AND ves.delta_hours IS NOT NULL
+  AND ves.delta_hours >= 0
+GROUP BY ves.variant, ves.event, ves.next_event;
