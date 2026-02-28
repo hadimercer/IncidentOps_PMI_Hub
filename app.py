@@ -323,6 +323,41 @@ SELECT
 FROM im.v_problem_candidate_top_cases;
 """
 
+CHANNEL_SUMMARY_SQL = """
+SELECT
+  report_channel,
+  cases,
+  avg_cycle_hours,
+  p90_cycle_hours,
+  avg_csat,
+  met_sla_rate,
+  reopen_rate,
+  reject_rate,
+  avg_escalations,
+  avg_resolver_changes,
+  feedback_rate,
+  missing_feedback_rate
+FROM im.v_channel_summary;
+"""
+
+CHANNEL_ISSUE_SUMMARY_SQL = """
+SELECT
+  report_channel,
+  issue_type,
+  cases,
+  avg_cycle_hours,
+  p90_cycle_hours,
+  avg_csat,
+  met_sla_rate,
+  reopen_rate,
+  reject_rate,
+  avg_escalations,
+  avg_resolver_changes,
+  feedback_rate,
+  missing_feedback_rate
+FROM im.v_channel_issue_summary;
+"""
+
 
 def fmt_int(value: object) -> str:
     if pd.isna(value):
@@ -1898,6 +1933,367 @@ def render_problem_candidates(db_url: str) -> None:
         )
 
 
+def render_channel_intake(db_url: str) -> None:
+    header("Channel & Intake", "Compare intake channel effectiveness and identify problematic channel+issue combinations.")
+
+    try:
+        channel_df = run_query(db_url, CHANNEL_SUMMARY_SQL)
+        channel_issue_df = run_query(db_url, CHANNEL_ISSUE_SUMMARY_SQL)
+    except Exception as exc:
+        st.error(f"Failed to query channel/intake views: {exc}")
+        st.stop()
+
+    tabs = st.tabs(["Overview", "Channel Comparison", "Bad Combos", "Export"])
+    filtered_bad_combos_for_export = pd.DataFrame()
+
+    with tabs[0]:
+        st.markdown("#### Channel Performance Overview")
+        if channel_df.empty:
+            st.info("No rows in im.v_channel_summary.")
+        else:
+            cdf = channel_df.copy()
+            for col in [
+                "cases",
+                "avg_cycle_hours",
+                "p90_cycle_hours",
+                "avg_csat",
+                "met_sla_rate",
+                "reopen_rate",
+                "reject_rate",
+                "avg_escalations",
+                "avg_resolver_changes",
+                "feedback_rate",
+                "missing_feedback_rate",
+            ]:
+                cdf[col] = pd.to_numeric(cdf[col], errors="coerce")
+
+            cycle_best = cdf.sort_values("avg_cycle_hours", ascending=True).iloc[0]
+            cycle_worst = cdf.sort_values("avg_cycle_hours", ascending=False).iloc[0]
+            sla_best = cdf.sort_values("met_sla_rate", ascending=False).iloc[0]
+            sla_worst = cdf.sort_values("met_sla_rate", ascending=True).iloc[0]
+            csat_best = cdf.sort_values("avg_csat", ascending=False).iloc[0]
+            csat_worst = cdf.sort_values("avg_csat", ascending=True).iloc[0]
+
+            row1 = st.columns(3)
+            row2 = st.columns(3)
+            with row1[0]:
+                metric_tile(
+                    "Best Cycle Channel",
+                    str(cycle_best["report_channel"]),
+                    f"{fmt_float(cycle_best['avg_cycle_hours'])} hrs",
+                    accent="#7FE0D6",
+                )
+            with row1[1]:
+                metric_tile(
+                    "Best SLA Channel",
+                    str(sla_best["report_channel"]),
+                    f"{fmt_pct(sla_best['met_sla_rate'])} met",
+                    accent="#7FE0D6",
+                )
+            with row1[2]:
+                metric_tile(
+                    "Best CSAT Channel",
+                    str(csat_best["report_channel"]),
+                    f"{fmt_float(csat_best['avg_csat'])} CSAT",
+                    accent="#7FE0D6",
+                )
+            with row2[0]:
+                metric_tile(
+                    "Worst Cycle Channel",
+                    str(cycle_worst["report_channel"]),
+                    f"{fmt_float(cycle_worst['avg_cycle_hours'])} hrs",
+                )
+            with row2[1]:
+                metric_tile(
+                    "Worst SLA Channel",
+                    str(sla_worst["report_channel"]),
+                    f"{fmt_pct(sla_worst['met_sla_rate'])} met",
+                )
+            with row2[2]:
+                metric_tile(
+                    "Worst CSAT Channel",
+                    str(csat_worst["report_channel"]),
+                    f"{fmt_float(csat_worst['avg_csat'])} CSAT",
+                )
+
+            st.divider()
+            st.markdown("#### Channel Ranking")
+            rank_df = cdf.copy()
+            rank_df["rank_cycle"] = rank_df["avg_cycle_hours"].rank(ascending=True, method="min")
+            rank_df["rank_sla"] = rank_df["met_sla_rate"].rank(ascending=False, method="min")
+            rank_df["rank_csat"] = rank_df["avg_csat"].rank(ascending=False, method="min")
+            rank_df["rank_score"] = rank_df["rank_cycle"] + rank_df["rank_sla"] + rank_df["rank_csat"]
+            rank_df = rank_df.sort_values(["rank_score", "cases"], ascending=[True, False])
+            rank_df["rank"] = range(1, len(rank_df) + 1)
+
+            rank_display = rank_df[
+                ["rank", "report_channel", "cases", "avg_cycle_hours", "met_sla_rate", "avg_csat", "rank_score"]
+            ].copy()
+            rank_display["cases"] = rank_display["cases"].map(fmt_int)
+            rank_display["avg_cycle_hours"] = rank_display["avg_cycle_hours"].map(lambda v: fmt_float(v, 2))
+            rank_display["met_sla_rate"] = rank_display["met_sla_rate"].map(lambda v: fmt_pct(v, 1))
+            rank_display["avg_csat"] = rank_display["avg_csat"].map(lambda v: fmt_float(v, 2))
+            rank_display["rank_score"] = rank_display["rank_score"].map(lambda v: fmt_float(v, 1))
+            st.dataframe(rank_display, use_container_width=True, hide_index=True)
+
+    with tabs[1]:
+        st.markdown("#### Channel Comparison")
+        if channel_df.empty:
+            st.info("No rows in im.v_channel_summary.")
+        else:
+            cdf = channel_df.copy()
+            for col in [
+                "cases",
+                "avg_cycle_hours",
+                "p90_cycle_hours",
+                "avg_csat",
+                "met_sla_rate",
+                "reopen_rate",
+                "reject_rate",
+                "avg_escalations",
+                "avg_resolver_changes",
+                "feedback_rate",
+                "missing_feedback_rate",
+            ]:
+                cdf[col] = pd.to_numeric(cdf[col], errors="coerce")
+
+            table_display = cdf.sort_values("cases", ascending=False).copy()
+            table_display["cases"] = table_display["cases"].map(fmt_int)
+            for col in ["avg_cycle_hours", "p90_cycle_hours", "avg_csat", "avg_escalations", "avg_resolver_changes"]:
+                table_display[col] = table_display[col].map(lambda v: fmt_float(v, 2))
+            for col in ["met_sla_rate", "reopen_rate", "reject_rate", "feedback_rate", "missing_feedback_rate"]:
+                table_display[col] = table_display[col].map(lambda v: fmt_pct(v, 1))
+            st.dataframe(table_display, use_container_width=True, hide_index=True)
+
+            st.divider()
+            row1 = st.columns(2)
+            with row1[0]:
+                fig_cycle = px.bar(cdf, x="report_channel", y="avg_cycle_hours", text_auto=".2f")
+                fig_cycle.update_traces(
+                    marker_color=ACCENT,
+                    hovertemplate="Channel=%{x}<br>Avg Cycle=%{y:.2f} hrs<extra></extra>",
+                )
+                st.plotly_chart(
+                    clayout(
+                        fig_cycle,
+                        title="Avg Cycle Hours by Channel",
+                        xtitle="Report Channel",
+                        ytitle="Avg Cycle (hrs)",
+                        h=430,
+                    ),
+                    use_container_width=True,
+                )
+            with row1[1]:
+                fig_sla = px.bar(cdf, x="report_channel", y="met_sla_rate", text_auto=".1%")
+                fig_sla.update_traces(
+                    marker_color="#7FE0D6",
+                    hovertemplate="Channel=%{x}<br>SLA Met=%{y:.1%}<extra></extra>",
+                )
+                st.plotly_chart(
+                    clayout(
+                        fig_sla,
+                        title="SLA Met Rate by Channel",
+                        xtitle="Report Channel",
+                        ytitle="Rate",
+                        h=430,
+                    ),
+                    use_container_width=True,
+                )
+
+            row2 = st.columns(2)
+            with row2[0]:
+                fig_feedback = px.bar(cdf, x="report_channel", y="missing_feedback_rate", text_auto=".1%")
+                fig_feedback.update_traces(
+                    marker_color="#F39C6B",
+                    hovertemplate="Channel=%{x}<br>Missing Feedback=%{y:.1%}<extra></extra>",
+                )
+                st.plotly_chart(
+                    clayout(
+                        fig_feedback,
+                        title="Missing Feedback Rate by Channel",
+                        xtitle="Report Channel",
+                        ytitle="Rate",
+                        h=430,
+                    ),
+                    use_container_width=True,
+                )
+            with row2[1]:
+                fig_scatter = px.scatter(
+                    cdf,
+                    x="avg_cycle_hours",
+                    y="avg_csat",
+                    text="report_channel",
+                    color="report_channel",
+                    hover_name="report_channel",
+                )
+                fig_scatter.update_traces(
+                    textposition="top center",
+                    marker=dict(size=12, line=dict(width=1, color="rgba(250,250,250,0.3)"), opacity=0.85),
+                    hovertemplate="Channel=%{hovertext}<br>Avg Cycle=%{x:.2f} hrs<br>Avg CSAT=%{y:.2f}<extra></extra>",
+                )
+                st.plotly_chart(
+                    clayout(
+                        fig_scatter,
+                        title="Avg Cycle vs Avg CSAT by Channel",
+                        xtitle="Avg Cycle (hrs)",
+                        ytitle="Avg CSAT",
+                        h=430,
+                    ),
+                    use_container_width=True,
+                )
+
+    with tabs[2]:
+        st.markdown("#### Bad Channel + Issue Combos")
+        if channel_issue_df.empty:
+            st.info("No rows in im.v_channel_issue_summary.")
+            filtered_bad_combos_for_export = pd.DataFrame()
+        else:
+            cidf = channel_issue_df.copy()
+            for col in [
+                "cases",
+                "avg_cycle_hours",
+                "p90_cycle_hours",
+                "avg_csat",
+                "met_sla_rate",
+                "reopen_rate",
+                "reject_rate",
+                "avg_escalations",
+                "avg_resolver_changes",
+                "feedback_rate",
+                "missing_feedback_rate",
+            ]:
+                cidf[col] = pd.to_numeric(cidf[col], errors="coerce")
+
+            fcols = st.columns([1.1, 1.2, 1.0])
+            with fcols[0]:
+                channel_opts = sorted([str(v) for v in cidf["report_channel"].dropna().unique().tolist()])
+                selected_channels = st.multiselect("Channel", options=channel_opts, default=channel_opts)
+            with fcols[1]:
+                issue_opts = sorted([str(v) for v in cidf["issue_type"].dropna().unique().tolist()])
+                selected_issues = st.multiselect("Issue Type", options=issue_opts, default=issue_opts)
+            with fcols[2]:
+                max_cases = int(cidf["cases"].dropna().max()) if not cidf["cases"].dropna().empty else 25
+                min_cases = st.slider("Min Cases", min_value=1, max_value=max(max_cases, 1), value=min(25, max_cases))
+
+            filtered = cidf.copy()
+            if selected_channels:
+                filtered = filtered[filtered["report_channel"].astype(str).isin(selected_channels)]
+            else:
+                filtered = filtered.iloc[0:0]
+            if selected_issues:
+                filtered = filtered[filtered["issue_type"].astype(str).isin(selected_issues)]
+            else:
+                filtered = filtered.iloc[0:0]
+            filtered = filtered[filtered["cases"] >= min_cases]
+
+            filtered["pain_score"] = (
+                filtered["cases"]
+                * (
+                    (1.0 - filtered["met_sla_rate"].fillna(0.0))
+                    + filtered["reject_rate"].fillna(0.0)
+                    + filtered["reopen_rate"].fillna(0.0)
+                    + filtered["missing_feedback_rate"].fillna(0.0)
+                )
+                + filtered["cases"] * (filtered["avg_cycle_hours"].fillna(0.0) / 10.0)
+            )
+
+            top25 = filtered.sort_values("pain_score", ascending=False).head(25).copy()
+            filtered_bad_combos_for_export = top25.copy()
+
+            display = top25[
+                [
+                    "report_channel",
+                    "issue_type",
+                    "cases",
+                    "pain_score",
+                    "avg_cycle_hours",
+                    "p90_cycle_hours",
+                    "avg_csat",
+                    "met_sla_rate",
+                    "reopen_rate",
+                    "reject_rate",
+                    "missing_feedback_rate",
+                ]
+            ].copy()
+            display["cases"] = display["cases"].map(fmt_int)
+            for col in ["pain_score", "avg_cycle_hours", "p90_cycle_hours", "avg_csat"]:
+                display[col] = display[col].map(lambda v: fmt_float(v, 2))
+            for col in ["met_sla_rate", "reopen_rate", "reject_rate", "missing_feedback_rate"]:
+                display[col] = display[col].map(lambda v: fmt_pct(v, 1))
+            st.dataframe(display, use_container_width=True, hide_index=True)
+
+            st.download_button(
+                "Download filtered bad combos CSV",
+                data=top25.to_csv(index=False).encode("utf-8"),
+                file_name="channel_bad_combos_filtered.csv",
+                mime="text/csv",
+                key="dl_bad_combos_tab",
+            )
+
+            st.divider()
+            if top25.empty:
+                st.info("No rows match current bad-combo filters.")
+            else:
+                chart_df = top25.head(10).copy()
+                chart_df["combo_label"] = chart_df["report_channel"].astype(str) + " | " + chart_df["issue_type"].astype(str)
+                chart_df = chart_df.sort_values("pain_score", ascending=True)
+                fig_pain = px.bar(
+                    chart_df,
+                    x="pain_score",
+                    y="combo_label",
+                    orientation="h",
+                    text_auto=".2f",
+                )
+                fig_pain.update_traces(
+                    marker_color=ACCENT,
+                    hovertemplate="Combo=%{y}<br>Pain Score=%{x:.2f}<extra></extra>",
+                )
+                st.plotly_chart(
+                    clayout(
+                        fig_pain,
+                        title="Top 10 Pain Scores (Channel | Issue)",
+                        xtitle="Pain Score",
+                        ytitle="Channel | Issue",
+                        h=520,
+                    ),
+                    use_container_width=True,
+                )
+
+    with tabs[3]:
+        st.markdown("#### Export")
+        if channel_df.empty:
+            st.info("No channel summary rows to export.")
+        else:
+            st.download_button(
+                "Download v_channel_summary CSV",
+                data=channel_df.to_csv(index=False).encode("utf-8"),
+                file_name="v_channel_summary.csv",
+                mime="text/csv",
+                key="dl_channel_summary",
+            )
+
+        if filtered_bad_combos_for_export.empty:
+            st.info("No filtered bad combos available yet. Set filters in Bad Combos tab first.")
+        else:
+            st.download_button(
+                "Download filtered bad combos CSV",
+                data=filtered_bad_combos_for_export.to_csv(index=False).encode("utf-8"),
+                file_name="channel_bad_combos_filtered.csv",
+                mime="text/csv",
+                key="dl_bad_combos_export",
+            )
+
+        st.write(
+            "Use these outputs to prioritize intake form improvements, routing-rule tuning, support-team training, "
+            "and channel nudges that reduce avoidable friction."
+        )
+
+    with st.expander("Data Notes"):
+        st.write(
+            "Channel comparisons reflect both process performance and data quality, not individual performance."
+        )
+
+
 def main() -> None:
     with st.sidebar:
         st.title("IncidentOps")
@@ -1909,6 +2305,7 @@ def main() -> None:
                 "Process Explorer",
                 "Bottlenecks",
                 "Escalations & Handoffs",
+                "Channel & Intake",
                 "Quality & CX",
                 "Problem Candidates",
             ],
@@ -1933,6 +2330,8 @@ def main() -> None:
         render_bottlenecks(db_url)
     elif page == "Escalations & Handoffs":
         render_escalations_handoffs(db_url)
+    elif page == "Channel & Intake":
+        render_channel_intake(db_url)
     elif page == "Quality & CX":
         render_quality_cx(db_url)
     elif page == "Problem Candidates":
