@@ -221,6 +221,54 @@ SELECT
 FROM im.v_case_sla;
 """
 
+CX_SUMMARY_SQL = """
+SELECT
+  cases,
+  avg_csat,
+  met_sla_rate,
+  closed_without_feedback_rate,
+  reopened_within_3h_rate,
+  reopened_within_24h_rate,
+  reject_rate,
+  avg_cycle_hours,
+  p90_cycle_hours
+FROM im.v_cx_summary;
+"""
+
+CX_BREAKDOWN_SQL = """
+SELECT
+  issue_type,
+  priority,
+  cases,
+  avg_csat,
+  met_sla_rate,
+  closed_without_feedback_rate,
+  reopened_within_3h_rate,
+  reject_rate,
+  avg_cycle_hours
+FROM im.v_cx_breakdown;
+"""
+
+CLOSURE_COMPLIANCE_SQL = """
+SELECT
+  case_id,
+  variant,
+  priority,
+  issue_type,
+  report_channel,
+  cycle_hours,
+  customer_satisfaction,
+  met_sla,
+  has_feedback,
+  has_reopen,
+  has_reject,
+  closed_without_feedback,
+  reopen_after_close_hours,
+  reopened_within_3h,
+  reopened_within_24h
+FROM im.v_closure_compliance;
+"""
+
 
 def fmt_int(value: object) -> str:
     if pd.isna(value):
@@ -1140,6 +1188,361 @@ def render_escalations_handoffs(db_url: str) -> None:
             st.dataframe(worklist_display, use_container_width=True, hide_index=True)
 
 
+def render_quality_cx(db_url: str) -> None:
+    header("Quality & CX", "Track closure quality, feedback coverage, and reopen-after-close outcomes.")
+
+    try:
+        cx_summary_df = run_query(db_url, CX_SUMMARY_SQL)
+        cx_breakdown_df = run_query(db_url, CX_BREAKDOWN_SQL)
+        closure_df = run_query(db_url, CLOSURE_COMPLIANCE_SQL)
+    except Exception as exc:
+        st.error(f"Failed to query quality/CX views: {exc}")
+        st.stop()
+
+    tab_overview, tab_cohorts, tab_breakdown, tab_export = st.tabs(
+        ["Overview", "Cohorts", "Breakdown", "Export"]
+    )
+
+    with tab_overview:
+        st.markdown("#### CX Summary")
+        if cx_summary_df.empty:
+            st.info("No rows in im.v_cx_summary.")
+        else:
+            s = cx_summary_df.iloc[0]
+            row_1 = st.columns(5)
+            row_2 = st.columns(4)
+
+            with row_1[0]:
+                metric_tile("Cases", fmt_int(s["cases"]))
+            with row_1[1]:
+                metric_tile("Avg CSAT", fmt_float(s["avg_csat"]))
+            with row_1[2]:
+                metric_tile("SLA Met %", fmt_pct(s["met_sla_rate"]))
+            with row_1[3]:
+                metric_tile("No Feedback %", fmt_pct(s["closed_without_feedback_rate"]))
+            with row_1[4]:
+                metric_tile("Reject %", fmt_pct(s["reject_rate"]))
+
+            with row_2[0]:
+                metric_tile("Reopen <=3h %", fmt_pct(s["reopened_within_3h_rate"]))
+            with row_2[1]:
+                metric_tile("Reopen <=24h %", fmt_pct(s["reopened_within_24h_rate"]))
+            with row_2[2]:
+                metric_tile("Avg Cycle (hrs)", fmt_float(s["avg_cycle_hours"]))
+            with row_2[3]:
+                metric_tile("P90 Cycle (hrs)", fmt_float(s["p90_cycle_hours"]))
+
+            col_rates, col_cycle = st.columns([1.3, 1.0])
+            with col_rates:
+                rates_df = pd.DataFrame(
+                    {
+                        "metric": [
+                            "No Feedback",
+                            "Reopen <=3h",
+                            "Reopen <=24h",
+                            "Reject",
+                            "SLA Met",
+                        ],
+                        "rate": [
+                            s["closed_without_feedback_rate"],
+                            s["reopened_within_3h_rate"],
+                            s["reopened_within_24h_rate"],
+                            s["reject_rate"],
+                            s["met_sla_rate"],
+                        ],
+                    }
+                )
+                rates_df["rate"] = pd.to_numeric(rates_df["rate"], errors="coerce").fillna(0.0)
+                fig_rates = px.bar(rates_df, x="metric", y="rate", text_auto=".1%")
+                fig_rates.update_traces(
+                    marker_color=ACCENT,
+                    hovertemplate="Metric=%{x}<br>Rate=%{y:.1%}<extra></extra>",
+                )
+                st.plotly_chart(
+                    clayout(
+                        fig_rates,
+                        title="Quality/CX Rates",
+                        xtitle="Metric",
+                        ytitle="Rate",
+                        h=420,
+                    ),
+                    use_container_width=True,
+                )
+
+            with col_cycle:
+                cycle_df = pd.DataFrame(
+                    {
+                        "metric": ["Avg Cycle", "P90 Cycle"],
+                        "hours": [s["avg_cycle_hours"], s["p90_cycle_hours"]],
+                    }
+                )
+                cycle_df["hours"] = pd.to_numeric(cycle_df["hours"], errors="coerce")
+                fig_cycle = px.bar(cycle_df, x="metric", y="hours", text_auto=".2f")
+                fig_cycle.update_traces(
+                    marker_color="#7FE0D6",
+                    hovertemplate="Metric=%{x}<br>Hours=%{y:.2f}<extra></extra>",
+                )
+                st.plotly_chart(
+                    clayout(
+                        fig_cycle,
+                        title="Cycle Time Benchmarks",
+                        xtitle="Metric",
+                        ytitle="Hours",
+                        h=420,
+                    ),
+                    use_container_width=True,
+                )
+
+    with tab_cohorts:
+        st.markdown("#### Cohort Explorer")
+        if closure_df.empty:
+            st.info("No rows in im.v_closure_compliance.")
+        else:
+            df = closure_df.copy()
+            for col in ["cycle_hours", "customer_satisfaction", "reopen_after_close_hours"]:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+            for col in [
+                "met_sla",
+                "has_reject",
+                "closed_without_feedback",
+                "reopened_within_3h",
+                "reopened_within_24h",
+            ]:
+                df[col] = df[col].fillna(False).astype(bool)
+
+            f1, f2, f3 = st.columns([1.2, 1.2, 1.0])
+            with f1:
+                only_no_feedback = st.checkbox("Closed without feedback only", value=False)
+                only_reopen_3h = st.checkbox("Reopened within 3 hours only", value=False)
+                only_reopen_24h = st.checkbox("Reopened within 24 hours only", value=False)
+            with f2:
+                only_rejected = st.checkbox("Rejected only", value=False)
+                only_missed_sla = st.checkbox("Missed SLA only", value=False)
+                priority_opts = sorted([str(v) for v in df["priority"].dropna().unique().tolist()])
+                selected_priorities = st.multiselect("Priority", options=priority_opts, default=priority_opts)
+            with f3:
+                issue_opts = sorted([str(v) for v in df["issue_type"].dropna().unique().tolist()])
+                selected_issue_types = st.multiselect("Issue Type", options=issue_opts, default=issue_opts)
+
+            filtered = df.copy()
+            if selected_priorities:
+                filtered = filtered[filtered["priority"].astype(str).isin(selected_priorities)]
+            else:
+                filtered = filtered.iloc[0:0]
+            if selected_issue_types:
+                filtered = filtered[filtered["issue_type"].astype(str).isin(selected_issue_types)]
+            else:
+                filtered = filtered.iloc[0:0]
+
+            if only_no_feedback:
+                filtered = filtered[filtered["closed_without_feedback"]]
+            if only_reopen_3h:
+                filtered = filtered[filtered["reopened_within_3h"]]
+            if only_reopen_24h:
+                filtered = filtered[filtered["reopened_within_24h"]]
+            if only_rejected:
+                filtered = filtered[filtered["has_reject"]]
+            if only_missed_sla:
+                filtered = filtered[filtered["met_sla"] == False]
+
+            filtered = filtered.sort_values("cycle_hours", ascending=False)
+            top200 = filtered.head(200).copy()
+
+            st.download_button(
+                "Download filtered cohort CSV",
+                data=filtered.to_csv(index=False).encode("utf-8"),
+                file_name="quality_cx_cohort_filtered.csv",
+                mime="text/csv",
+            )
+
+            top200_display = top200.copy()
+            top200_display["cycle_hours"] = top200_display["cycle_hours"].map(lambda v: fmt_float(v, 2))
+            top200_display["customer_satisfaction"] = top200_display["customer_satisfaction"].map(
+                lambda v: fmt_float(v, 2)
+            )
+            top200_display["reopen_after_close_hours"] = top200_display["reopen_after_close_hours"].map(
+                lambda v: fmt_float(v, 2)
+            )
+
+            st.dataframe(
+                top200_display[
+                    [
+                        "case_id",
+                        "priority",
+                        "issue_type",
+                        "variant",
+                        "report_channel",
+                        "cycle_hours",
+                        "customer_satisfaction",
+                        "met_sla",
+                        "closed_without_feedback",
+                        "reopened_within_3h",
+                        "reopened_within_24h",
+                        "has_reject",
+                        "reopen_after_close_hours",
+                    ]
+                ],
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            plot_df = filtered.dropna(subset=["cycle_hours", "customer_satisfaction"]).copy()
+            if plot_df.empty:
+                st.info("Not enough numeric rows for cohort scatter chart.")
+            else:
+                fig_scatter = px.scatter(
+                    plot_df,
+                    x="cycle_hours",
+                    y="customer_satisfaction",
+                    color="met_sla",
+                    hover_name="case_id",
+                )
+                fig_scatter.update_traces(
+                    marker=dict(size=10, line=dict(width=1, color="rgba(250,250,250,0.30)"), opacity=0.80),
+                    hovertemplate="Case=%{hovertext}<br>Cycle=%{x:.2f} hrs<br>CSAT=%{y:.2f}<extra></extra>",
+                )
+                st.plotly_chart(
+                    clayout(
+                        fig_scatter,
+                        title="Cycle Time vs CSAT (Filtered Cohort)",
+                        xtitle="Cycle Hours",
+                        ytitle="Customer Satisfaction",
+                        h=520,
+                    ),
+                    use_container_width=True,
+                )
+
+    with tab_breakdown:
+        st.markdown("#### CX Breakdown by Issue Type and Priority")
+        if cx_breakdown_df.empty:
+            st.info("No rows in im.v_cx_breakdown.")
+        else:
+            bdf = cx_breakdown_df.copy()
+            for col in [
+                "cases",
+                "avg_csat",
+                "met_sla_rate",
+                "closed_without_feedback_rate",
+                "reopened_within_3h_rate",
+                "reject_rate",
+                "avg_cycle_hours",
+            ]:
+                bdf[col] = pd.to_numeric(bdf[col], errors="coerce")
+            bdf = bdf.sort_values("cases", ascending=False)
+
+            display = bdf.copy()
+            display["cases"] = display["cases"].map(fmt_int)
+            for col in ["avg_csat", "avg_cycle_hours"]:
+                display[col] = display[col].map(lambda v: fmt_float(v, 2))
+            for col in ["met_sla_rate", "closed_without_feedback_rate", "reopened_within_3h_rate", "reject_rate"]:
+                display[col] = display[col].map(lambda v: fmt_pct(v, 1))
+            st.dataframe(display, use_container_width=True, hide_index=True)
+
+            closed_by_issue = (
+                bdf.dropna(subset=["issue_type", "cases", "closed_without_feedback_rate"])
+                .assign(weighted_no_feedback=lambda d: d["closed_without_feedback_rate"] * d["cases"])
+                .groupby("issue_type", as_index=False)
+                .agg(cases=("cases", "sum"), weighted_no_feedback=("weighted_no_feedback", "sum"))
+            )
+            closed_by_issue["closed_without_feedback_rate"] = (
+                closed_by_issue["weighted_no_feedback"] / closed_by_issue["cases"]
+            )
+            closed_by_issue = closed_by_issue.drop(columns=["weighted_no_feedback"])
+
+            if closure_df.empty:
+                reopen24_by_issue = pd.DataFrame(columns=["issue_type", "reopened_within_24h_rate"])
+            else:
+                reopen24_by_issue = (
+                    closure_df[["issue_type", "reopened_within_24h"]]
+                    .dropna(subset=["issue_type"])
+                    .assign(reopened_within_24h=lambda d: d["reopened_within_24h"].fillna(False).astype(float))
+                    .groupby("issue_type", as_index=False)
+                    .agg(reopened_within_24h_rate=("reopened_within_24h", "mean"))
+                )
+
+            issue_weight = closed_by_issue.merge(reopen24_by_issue, on="issue_type", how="outer")
+
+            chart_cols = st.columns(2)
+            with chart_cols[0]:
+                top_feedback_gap = issue_weight.sort_values("closed_without_feedback_rate", ascending=False).head(10)
+                fig_gap = px.bar(
+                    top_feedback_gap,
+                    x="issue_type",
+                    y="closed_without_feedback_rate",
+                    text_auto=".1%",
+                )
+                fig_gap.update_traces(
+                    marker_color=ACCENT,
+                    hovertemplate="Issue=%{x}<br>No Feedback=%{y:.1%}<extra></extra>",
+                )
+                st.plotly_chart(
+                    clayout(
+                        fig_gap,
+                        title="Closed Without Feedback Rate by Issue Type",
+                        xtitle="Issue Type",
+                        ytitle="Rate",
+                        h=460,
+                    ),
+                    use_container_width=True,
+                )
+
+            with chart_cols[1]:
+                top_reopen24 = issue_weight.sort_values("reopened_within_24h_rate", ascending=False).head(10)
+                fig_reopen = px.bar(
+                    top_reopen24,
+                    x="issue_type",
+                    y="reopened_within_24h_rate",
+                    text_auto=".1%",
+                )
+                fig_reopen.update_traces(
+                    marker_color="#7FE0D6",
+                    hovertemplate="Issue=%{x}<br>Reopened <=24h=%{y:.1%}<extra></extra>",
+                )
+                st.plotly_chart(
+                    clayout(
+                        fig_reopen,
+                        title="Reopened Within 24h Rate by Issue Type",
+                        xtitle="Issue Type",
+                        ytitle="Rate",
+                        h=460,
+                    ),
+                    use_container_width=True,
+                )
+
+    with tab_export:
+        st.markdown("#### Export Datasets")
+        if cx_breakdown_df.empty:
+            st.info("No rows in im.v_cx_breakdown to export.")
+        else:
+            st.download_button(
+                "Download v_cx_breakdown CSV",
+                data=cx_breakdown_df.to_csv(index=False).encode("utf-8"),
+                file_name="v_cx_breakdown.csv",
+                mime="text/csv",
+            )
+
+        if closure_df.empty:
+            st.info("No rows in im.v_closure_compliance to export.")
+        else:
+            st.download_button(
+                "Download v_closure_compliance CSV",
+                data=closure_df.to_csv(index=False).encode("utf-8"),
+                file_name="v_closure_compliance.csv",
+                mime="text/csv",
+            )
+            st.caption("v_closure_compliance can be large depending on case volume.")
+
+        st.write(
+            "Use the cohort export for focused remediation work and the full exports for deeper offline analysis "
+            "in BI tools or notebooks."
+        )
+
+    with st.expander("Data Notes"):
+        st.write(
+            "These metrics are for process improvement and customer outcomes, not individual performance evaluation."
+        )
+
+
 def main() -> None:
     with st.sidebar:
         st.title("IncidentOps")
@@ -1151,7 +1554,7 @@ def main() -> None:
                 "Process Explorer",
                 "Bottlenecks",
                 "Escalations & Handoffs",
-                "Quality & CX (coming soon)",
+                "Quality & CX",
                 "Problem Candidates (coming soon)",
             ],
         )
@@ -1175,6 +1578,8 @@ def main() -> None:
         render_bottlenecks(db_url)
     elif page == "Escalations & Handoffs":
         render_escalations_handoffs(db_url)
+    elif page == "Quality & CX":
+        render_quality_cx(db_url)
     else:
         render_coming_soon(page)
 
