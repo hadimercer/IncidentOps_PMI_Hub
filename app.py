@@ -12,9 +12,16 @@ import psycopg2
 import streamlit as st
 from dotenv import load_dotenv
 
+P_DARK_BLUE = "#1E5C7A"
+P_MID_BLUE = "#2E7AA3"
+P_TEXT_DARK = "#FAFAFA"
+P_TEXT_MED = "rgba(255,255,255,0.78)"
+COLOR_TEAL = "#4DB6AC"
+COLOR_ORANGE = "#FF7043"
+
 ST_BG = "#0E1117"
-ST_TEXT = "#FAFAFA"
-ACCENT = "#4DB6AC"
+ST_TEXT = P_TEXT_DARK
+ACCENT = COLOR_TEAL
 CARD_BG = "#262730"
 
 
@@ -22,60 +29,6 @@ st.set_page_config(
     page_title="IncidentOps | PMI Hub",
     layout="wide",
     initial_sidebar_state="expanded",
-)
-
-st.markdown(
-    f"""
-    <style>
-      .io-header {{
-        border-left: 6px solid {ACCENT};
-        border-radius: 12px;
-        padding: 18px 18px 16px 18px;
-        margin: 0 0 16px 0;
-        background: linear-gradient(90deg, rgba(77,182,172,0.20), rgba(38,39,48,0.92));
-      }}
-      .io-title {{
-        color: {ST_TEXT};
-        font-size: 1.65rem;
-        font-weight: 700;
-        margin: 0;
-        line-height: 1.2;
-      }}
-      .io-subtitle {{
-        color: #C7D0D9;
-        font-size: 0.95rem;
-        margin-top: 6px;
-      }}
-      .io-card {{
-        border-left: 5px solid {ACCENT};
-        border-radius: 10px;
-        padding: 12px 14px;
-        min-height: 96px;
-      }}
-      .io-card-label {{
-        color: #C7D0D9;
-        font-size: 0.86rem;
-        letter-spacing: 0.2px;
-        margin-bottom: 4px;
-      }}
-      .io-card-value {{
-        color: {ST_TEXT};
-        font-size: 1.55rem;
-        font-weight: 700;
-        line-height: 1.1;
-      }}
-      .io-card-sub {{
-        color: #9AA7B2;
-        font-size: 0.78rem;
-        margin-top: 6px;
-      }}
-      .stDataFrame {{
-        border: 1px solid rgba(77,182,172,0.18);
-        border-radius: 8px;
-      }}
-    </style>
-    """,
-    unsafe_allow_html=True,
 )
 
 KPI_SQL = """
@@ -451,9 +404,9 @@ def fmt_pct(value: object, decimals: int = 1) -> str:
 def header(title: str, subtitle: str) -> None:
     st.markdown(
         f"""
-        <div class="io-header">
-          <div class="io-title">{title}</div>
-          <div class="io-subtitle">{subtitle}</div>
+        <div class="page-header">
+          <h1>{title}</h1>
+          <p>{subtitle}</p>
         </div>
         """,
         unsafe_allow_html=True,
@@ -735,9 +688,10 @@ def render_executive_overview(db_url: str) -> None:
             plot_df,
             x="variant",
             y="cases",
+            color="variant",
             text_auto=True,
         )
-        fig_cases.update_traces(marker_color=ACCENT, hovertemplate="Variant=%{x}<br>Cases=%{y}<extra></extra>")
+        fig_cases.update_traces(hovertemplate="Variant=%{x}<br>Cases=%{y}<extra></extra>")
         st.plotly_chart(
             clayout(fig_cases, title="Cases by Variant", xtitle="Variant", ytitle="Cases"),
             use_container_width=True,
@@ -747,10 +701,10 @@ def render_executive_overview(db_url: str) -> None:
             plot_df,
             x="variant",
             y="avg_cycle_hours",
+            color="variant",
             text_auto=".2f",
         )
         fig_cycle.update_traces(
-            marker_color="#7FE0D6",
             hovertemplate="Variant=%{x}<br>Avg Cycle=%{y:.2f} hrs<extra></extra>",
         )
         st.plotly_chart(
@@ -935,7 +889,6 @@ def render_process_explorer(db_url: str) -> None:
                 text_auto=".2f",
             )
             fig_dwell.update_traces(
-                marker_color=ACCENT,
                 hovertemplate="Event=%{y}<br>Avg Dwell=%{x:.2f} hrs<extra></extra>",
             )
             st.plotly_chart(
@@ -994,7 +947,6 @@ def render_bottlenecks(db_url: str) -> None:
                 text_auto=".2f",
             )
             fig_dwell.update_traces(
-                marker_color=ACCENT,
                 hovertemplate="Event=%{x}<br>Avg Dwell=%{y:.2f} hrs<extra></extra>",
             )
             st.plotly_chart(
@@ -1083,7 +1035,6 @@ def render_bottlenecks(db_url: str) -> None:
                     text_auto=".2f",
                 )
                 fig_slow.update_traces(
-                    marker_color="#7FE0D6",
                     hovertemplate="Transition=%{y}<br>P90 Delay=%{x:.2f} hrs<extra></extra>",
                 )
                 st.plotly_chart(
@@ -1251,7 +1202,6 @@ def render_escalations_handoffs(db_url: str) -> None:
                     text_auto=".1%",
                 )
                 fig_hot.update_traces(
-                    marker_color=ACCENT,
                     hovertemplate="Group=%{y}<br>High Handoff=%{x:.1%}<extra></extra>",
                 )
                 st.plotly_chart(
@@ -1483,7 +1433,6 @@ def render_quality_cx(db_url: str) -> None:
                 rates_df["rate"] = pd.to_numeric(rates_df["rate"], errors="coerce").fillna(0.0)
                 fig_rates = px.bar(rates_df, x="metric", y="rate", text_auto=".1%")
                 fig_rates.update_traces(
-                    marker_color=ACCENT,
                     hovertemplate="Metric=%{x}<br>Rate=%{y:.1%}<extra></extra>",
                 )
                 st.plotly_chart(
@@ -1507,7 +1456,6 @@ def render_quality_cx(db_url: str) -> None:
                 cycle_df["hours"] = pd.to_numeric(cycle_df["hours"], errors="coerce")
                 fig_cycle = px.bar(cycle_df, x="metric", y="hours", text_auto=".2f")
                 fig_cycle.update_traces(
-                    marker_color="#7FE0D6",
                     hovertemplate="Metric=%{x}<br>Hours=%{y:.2f}<extra></extra>",
                 )
                 st.plotly_chart(
@@ -1700,7 +1648,6 @@ def render_quality_cx(db_url: str) -> None:
                     text_auto=".1%",
                 )
                 fig_gap.update_traces(
-                    marker_color=ACCENT,
                     hovertemplate="Issue=%{x}<br>No Feedback=%{y:.1%}<extra></extra>",
                 )
                 st.plotly_chart(
@@ -1723,7 +1670,6 @@ def render_quality_cx(db_url: str) -> None:
                     text_auto=".1%",
                 )
                 fig_reopen.update_traces(
-                    marker_color="#7FE0D6",
                     hovertemplate="Issue=%{x}<br>Reopened <=24h=%{y:.1%}<extra></extra>",
                 )
                 st.plotly_chart(
@@ -1858,7 +1804,6 @@ def render_problem_candidates(db_url: str) -> None:
                     text_auto=".2f",
                 )
                 fig_impact.update_traces(
-                    marker_color=ACCENT,
                     hovertemplate="Candidate=%{y}<br>Impact=%{x:.2f}<extra></extra>",
                 )
                 st.plotly_chart(
@@ -1986,7 +1931,6 @@ def render_problem_candidates(db_url: str) -> None:
                     else:
                         fig_hist = px.histogram(hist_df, x="cycle_hours", nbins=20)
                         fig_hist.update_traces(
-                            marker_color=ACCENT,
                             hovertemplate="Cycle Hours=%{x:.2f}<br>Cases=%{y}<extra></extra>",
                         )
                         st.plotly_chart(
@@ -2202,7 +2146,6 @@ def render_channel_intake(db_url: str) -> None:
             with row1[0]:
                 fig_cycle = px.bar(cdf, x="report_channel", y="avg_cycle_hours", text_auto=".2f")
                 fig_cycle.update_traces(
-                    marker_color=ACCENT,
                     hovertemplate="Channel=%{x}<br>Avg Cycle=%{y:.2f} hrs<extra></extra>",
                 )
                 st.plotly_chart(
@@ -2218,7 +2161,6 @@ def render_channel_intake(db_url: str) -> None:
             with row1[1]:
                 fig_sla = px.bar(cdf, x="report_channel", y="met_sla_rate", text_auto=".1%")
                 fig_sla.update_traces(
-                    marker_color="#7FE0D6",
                     hovertemplate="Channel=%{x}<br>SLA Met=%{y:.1%}<extra></extra>",
                 )
                 st.plotly_chart(
@@ -2236,7 +2178,6 @@ def render_channel_intake(db_url: str) -> None:
             with row2[0]:
                 fig_feedback = px.bar(cdf, x="report_channel", y="missing_feedback_rate", text_auto=".1%")
                 fig_feedback.update_traces(
-                    marker_color="#F39C6B",
                     hovertemplate="Channel=%{x}<br>Missing Feedback=%{y:.1%}<extra></extra>",
                 )
                 st.plotly_chart(
@@ -2377,7 +2318,6 @@ def render_channel_intake(db_url: str) -> None:
                     text_auto=".2f",
                 )
                 fig_pain.update_traces(
-                    marker_color=ACCENT,
                     hovertemplate="Combo=%{y}<br>Pain Score=%{x:.2f}<extra></extra>",
                 )
                 st.plotly_chart(
@@ -2517,7 +2457,6 @@ def render_knowledge_fcr(db_url: str) -> None:
                     fs = fs.sort_values("fcr_rate", ascending=False)
                     fig_fcr = px.bar(fs, x="issue_type", y="fcr_rate", text_auto=".1%")
                     fig_fcr.update_traces(
-                        marker_color=ACCENT,
                         hovertemplate="Issue Type=%{x}<br>FCR Rate=%{y:.1%}<extra></extra>",
                     )
                     st.plotly_chart(
@@ -2579,7 +2518,6 @@ def render_knowledge_fcr(db_url: str) -> None:
                 text_auto=".2f",
             )
             fig_enable.update_traces(
-                marker_color=ACCENT,
                 hovertemplate="Issue Type=%{y}<br>Enablement Score=%{x:.2f}<extra></extra>",
             )
             st.plotly_chart(
@@ -2706,7 +2644,6 @@ def render_knowledge_fcr(db_url: str) -> None:
                 else:
                     fig_hist = px.histogram(hist_df, x="cycle_hours", nbins=20)
                     fig_hist.update_traces(
-                        marker_color=ACCENT,
                         hovertemplate="Cycle Hours=%{x:.2f}<br>Cases=%{y}<extra></extra>",
                     )
                     st.plotly_chart(
@@ -2774,9 +2711,116 @@ def render_knowledge_fcr(db_url: str) -> None:
 
 
 def main() -> None:
+    st.markdown(
+        f"""
+        <style>
+          .page-header {{
+            background: linear-gradient(90deg, {P_DARK_BLUE} 0%, {P_MID_BLUE} 100%);
+            border-radius: 14px;
+            padding: 18px 20px;
+            margin: 0 0 16px 0;
+          }}
+          .page-header h1 {{
+            color: {P_TEXT_DARK};
+            font-size: 1.9rem;
+            font-weight: 700;
+            margin: 0;
+            line-height: 1.2;
+          }}
+          .page-header p {{
+            color: {P_TEXT_MED};
+            font-size: 0.96rem;
+            margin: 6px 0 0 0;
+            line-height: 1.35;
+          }}
+          .sidebar-logo {{
+            background: linear-gradient(135deg, {P_DARK_BLUE} 0%, {P_MID_BLUE} 100%);
+            border-radius: 14px;
+            padding: 14px 14px 12px 14px;
+            margin: 4px 0 12px 0;
+          }}
+          .sidebar-logo h2 {{
+            color: {P_TEXT_DARK};
+            font-size: 1.25rem;
+            font-weight: 700;
+            margin: 0;
+            line-height: 1.2;
+          }}
+          .sidebar-logo p  {{
+            color: {P_TEXT_MED};
+            font-size: 0.84rem;
+            margin: 5px 0 0 0;
+            line-height: 1.25;
+          }}
+          .info-pill {{
+            display: inline-block;
+            padding: 0.2rem 0.55rem;
+            border-radius: 999px;
+            font-size: 0.78rem;
+            font-weight: 600;
+            color: {P_TEXT_DARK};
+            background: rgba(77,182,172,0.26);
+            border: 1px solid rgba(77,182,172,0.55);
+          }}
+          .divider {{
+            height: 1px;
+            width: 100%;
+            margin: 0.6rem 0 1rem 0;
+            background: linear-gradient(90deg, rgba(255,255,255,0.32), rgba(255,255,255,0.08));
+          }}
+          [data-testid="stMetricLabel"] {{
+            color: {P_TEXT_MED};
+            font-size: 0.86rem;
+            letter-spacing: 0.2px;
+          }}
+          [data-testid="stMetricValue"] {{
+            color: {P_TEXT_DARK};
+            font-size: 1.62rem;
+            font-weight: 700;
+          }}
+          .io-card {{
+            border-left: 5px solid {COLOR_TEAL};
+            border-radius: 10px;
+            padding: 12px 14px;
+            min-height: 96px;
+          }}
+          .io-card-label {{
+            color: #C7D0D9;
+            font-size: 0.86rem;
+            letter-spacing: 0.2px;
+            margin-bottom: 4px;
+          }}
+          .io-card-value {{
+            color: {P_TEXT_DARK};
+            font-size: 1.55rem;
+            font-weight: 700;
+            line-height: 1.1;
+          }}
+          .io-card-sub {{
+            color: #9AA7B2;
+            font-size: 0.78rem;
+            margin-top: 6px;
+          }}
+          .stDataFrame {{
+            border: 1px solid rgba(77,182,172,0.18);
+            border-radius: 8px;
+          }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
     with st.sidebar:
-        st.title("IncidentOps")
-        st.caption("Process Mining Insights Hub")
+        st.markdown(
+            """
+            <div class="sidebar-logo">
+              <h2>IncidentOps</h2>
+              <p>Process Mining Insights Hub</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        st.markdown("##### Navigate")
         page = st.radio(
             "Navigation",
             [
@@ -2789,6 +2833,7 @@ def main() -> None:
                 "Quality & CX",
                 "Problem Candidates",
             ],
+            label_visibility="collapsed",
         )
 
     db_url = get_db_url()
@@ -2820,4 +2865,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
