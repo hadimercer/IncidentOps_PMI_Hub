@@ -581,9 +581,26 @@ def build_sankey(transitions: pd.DataFrame, title: str, max_rows: int, height: i
     return fig
 
 
-def load_db_url() -> Optional[str]:
+def get_db_url() -> Optional[str]:
     load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env")
-    return os.getenv("DATABASE_URL_POOLED") or os.getenv("DATABASE_URL_DIRECT")
+
+    db_url = os.getenv("DATABASE_URL_POOLED") or os.getenv("DATABASE_URL_DIRECT")
+    if db_url:
+        return db_url
+
+    try:
+        db_url = st.secrets["DATABASE_URL_POOLED"]
+    except Exception:
+        db_url = None
+    if db_url:
+        return db_url
+
+    try:
+        db_url = st.secrets["DATABASE_URL_DIRECT"]
+    except Exception:
+        db_url = None
+
+    return db_url or None
 
 
 @st.cache_resource(show_spinner=False)
@@ -2731,9 +2748,11 @@ def main() -> None:
             ],
         )
 
-    db_url = load_db_url()
+    db_url = get_db_url()
     if not db_url:
-        st.warning("Set DATABASE_URL_POOLED or DATABASE_URL_DIRECT in .env to load dashboard data.")
+        st.warning(
+            "Set DATABASE_URL_POOLED or DATABASE_URL_DIRECT in .env, or add them to Streamlit secrets, to load dashboard data."
+        )
         st.stop()
 
     try:
