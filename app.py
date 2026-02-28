@@ -6,6 +6,7 @@ from typing import Optional
 
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import psycopg2
 import streamlit as st
 from dotenv import load_dotenv
@@ -112,6 +113,39 @@ SELECT min(created_at) AS min_created, max(closed_at) AS max_closed
 FROM im.v_case;
 """
 
+TRANSITION_SUMMARY_SQL = """
+SELECT
+  from_event,
+  to_event,
+  transition_count,
+  avg_delta_hours,
+  median_delta_hours,
+  p90_delta_hours
+FROM im.v_transition_summary
+ORDER BY transition_count DESC;
+"""
+
+TRANSITION_BY_VARIANT_SQL = """
+SELECT
+  variant,
+  from_event,
+  to_event,
+  transition_count,
+  avg_delta_hours
+FROM im.v_transition_by_variant;
+"""
+
+DWELL_SQL = """
+SELECT
+  event,
+  occurrences,
+  avg_dwell_hours,
+  median_dwell_hours,
+  p90_dwell_hours
+FROM im.v_dwell_by_event
+ORDER BY avg_dwell_hours DESC;
+"""
+
 
 def fmt_int(value: object) -> str:
     if pd.isna(value):
@@ -198,6 +232,69 @@ def clayout(
         linecolor="rgba(250,250,250,0.25)",
         tickfont=dict(color=ST_TEXT),
         title_font=dict(color=ST_TEXT),
+    )
+    return fig
+
+
+def build_sankey(transitions: pd.DataFrame, title: str, max_rows: int, height: int = 520):
+    if transitions.empty:
+        return None
+
+    use_cols = ["from_event", "to_event", "transition_count", "avg_delta_hours"]
+    missing_cols = [c for c in use_cols if c not in transitions.columns]
+    if missing_cols:
+        return None
+
+    sankey_df = transitions[use_cols].copy()
+    sankey_df = sankey_df.dropna(subset=["from_event", "to_event"])
+    sankey_df["transition_count"] = pd.to_numeric(sankey_df["transition_count"], errors="coerce")
+    sankey_df["avg_delta_hours"] = pd.to_numeric(sankey_df["avg_delta_hours"], errors="coerce")
+    sankey_df = sankey_df[sankey_df["transition_count"] > 0]
+    sankey_df = sankey_df.sort_values("transition_count", ascending=False).head(max_rows)
+    if sankey_df.empty:
+        return None
+
+    nodes = pd.unique(sankey_df[["from_event", "to_event"]].values.ravel("K")).tolist()
+    node_ix = {name: idx for idx, name in enumerate(nodes)}
+
+    sources = sankey_df["from_event"].map(node_ix).tolist()
+    targets = sankey_df["to_event"].map(node_ix).tolist()
+    values = sankey_df["transition_count"].astype(float).tolist()
+    hover_hours = sankey_df["avg_delta_hours"].tolist()
+
+    fig = go.Figure(
+        data=[
+            go.Sankey(
+                arrangement="snap",
+                node=dict(
+                    pad=18,
+                    thickness=16,
+                    line=dict(color="rgba(250,250,250,0.25)", width=0.8),
+                    label=nodes,
+                    color="rgba(77,182,172,0.75)",
+                    hovertemplate="%{label}<extra></extra>",
+                ),
+                link=dict(
+                    source=sources,
+                    target=targets,
+                    value=values,
+                    customdata=hover_hours,
+                    color="rgba(127,224,214,0.38)",
+                    hovertemplate=(
+                        "From=%{source.label}<br>To=%{target.label}<br>"
+                        "Transitions=%{value:,.0f}<br>Avg Hours=%{customdata:.2f}<extra></extra>"
+                    ),
+                ),
+            )
+        ]
+    )
+    fig.update_layout(
+        title=title,
+        height=height,
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color=ST_TEXT, size=13),
+        margin=dict(l=10, r=10, t=55, b=10),
     )
     return fig
 
@@ -345,6 +442,163 @@ def render_executive_overview(db_url: str) -> None:
         st.write("For process improvement, not individual performance evaluation.")
 
 
+def render_process_explorer(db_url: str) -> None:
+    header("Process Explorer", "Variant and transition flow analytics across the incident lifecycle.")
+
+    try:
+        variant_df = run_query(db_url, VARIANT_SQL)
+        transition_df = run_query(db_url, TRANSITION_SUMMARY_SQL)
+        variant_transition_df = run_query(db_url, TRANSITION_BY_VARIANT_SQL)
+        dwell_df = run_query(db_url, DWELL_SQL)
+    except Exception as exc:
+        st.error(f"Failed to query process explorer views: {exc}")
+        st.stop()
+
+    st.markdown("#### Variant Leaderboard")
+    selected_variant: Optional[str] = None
+    if variant_df.empty:
+        st.info("No rows in im.v_variant_summary.")
+    else:
+        variants_sorted = variant_df.sort_values("cases", ascending=False).copy()
+        variant_options = [
+            str(v) for v in variants_sorted["variant"].tolist() if pd.notna(v) and str(v).strip() != ""
+        ]
+        if variant_options:
+            selected_variant = st.selectbox("Variant drilldown", options=variant_options, index=0)
+        else:
+            st.info("No variant values available for drilldown.")
+
+        display_variants = variants_sorted.copy()
+        display_variants["cases"] = pd.to_numeric(display_variants["cases"], errors="coerce").astype("Int64")
+        for col in ["avg_cycle_hours", "p90_cycle_hours", "avg_csat", "avg_escalations", "avg_resolver_changes"]:
+            display_variants[col] = display_variants[col].map(lambda v: fmt_float(v, 2))
+        for col in ["met_sla_rate", "reopen_rate", "reject_rate"]:
+            display_variants[col] = display_variants[col].map(lambda v: fmt_pct(v, 1))
+
+        st.dataframe(display_variants, use_container_width=True, hide_index=True)
+
+    st.divider()
+    st.markdown("#### Top Transitions (Overall)")
+    if transition_df.empty:
+        st.info("No rows in im.v_transition_summary.")
+    else:
+        transition_df = transition_df.copy()
+        transition_df["transition_count"] = pd.to_numeric(transition_df["transition_count"], errors="coerce")
+        for col in ["avg_delta_hours", "median_delta_hours", "p90_delta_hours"]:
+            transition_df[col] = pd.to_numeric(transition_df[col], errors="coerce")
+        transition_df = transition_df.dropna(subset=["transition_count"])
+        transition_df = transition_df.sort_values("transition_count", ascending=False)
+
+        col_table, col_sankey = st.columns([1.1, 1.2])
+
+        with col_table:
+            top20 = transition_df.head(20).copy()
+            top20_display = top20.copy()
+            for col in ["avg_delta_hours", "median_delta_hours", "p90_delta_hours"]:
+                top20_display[col] = top20_display[col].map(lambda v: fmt_float(v, 2))
+            top20_display["transition_count"] = top20_display["transition_count"].map(fmt_int)
+            st.dataframe(top20_display, use_container_width=True, hide_index=True)
+
+        with col_sankey:
+            fig_overall = build_sankey(
+                transitions=transition_df,
+                title="Overall Flow Sankey (Top 25 Transitions)",
+                max_rows=25,
+                height=540,
+            )
+            if fig_overall is None:
+                st.info("Not enough transition data to draw overall Sankey.")
+            else:
+                st.plotly_chart(fig_overall, use_container_width=True)
+
+    st.divider()
+    st.markdown("#### Variant Drilldown")
+    if selected_variant is None:
+        st.info("Select a variant in the leaderboard to view transition drilldown.")
+    elif variant_transition_df.empty:
+        st.info("No rows in im.v_transition_by_variant.")
+    else:
+        vdf = variant_transition_df.copy()
+        vdf["variant"] = vdf["variant"].astype("string")
+        vdf["transition_count"] = pd.to_numeric(vdf["transition_count"], errors="coerce")
+        vdf["avg_delta_hours"] = pd.to_numeric(vdf["avg_delta_hours"], errors="coerce")
+        vdf = vdf.dropna(subset=["transition_count"])
+        selected_df = vdf[vdf["variant"] == selected_variant].copy()
+        selected_df = selected_df.sort_values("transition_count", ascending=False)
+
+        if selected_df.empty:
+            st.info(f"No transition rows for variant '{selected_variant}'.")
+        else:
+            col_table_v, col_sankey_v = st.columns([1.1, 1.1])
+            with col_table_v:
+                top20_variant = selected_df.head(20).copy()
+                top20_variant_display = top20_variant.copy()
+                top20_variant_display["transition_count"] = top20_variant_display["transition_count"].map(fmt_int)
+                top20_variant_display["avg_delta_hours"] = top20_variant_display["avg_delta_hours"].map(
+                    lambda v: fmt_float(v, 2)
+                )
+                st.dataframe(
+                    top20_variant_display[["from_event", "to_event", "transition_count", "avg_delta_hours"]],
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+            with col_sankey_v:
+                fig_variant = build_sankey(
+                    transitions=selected_df,
+                    title=f"Variant Flow Sankey: {selected_variant} (Top 20)",
+                    max_rows=20,
+                    height=500,
+                )
+                if fig_variant is None:
+                    st.info("Not enough transition data to draw variant Sankey.")
+                else:
+                    st.plotly_chart(fig_variant, use_container_width=True)
+
+    st.divider()
+    st.markdown("#### Dwell Times")
+    if dwell_df.empty:
+        st.info("No rows in im.v_dwell_by_event.")
+    else:
+        dwell_df = dwell_df.copy()
+        dwell_df["occurrences"] = pd.to_numeric(dwell_df["occurrences"], errors="coerce")
+        for col in ["avg_dwell_hours", "median_dwell_hours", "p90_dwell_hours"]:
+            dwell_df[col] = pd.to_numeric(dwell_df[col], errors="coerce")
+        dwell_df = dwell_df.sort_values("avg_dwell_hours", ascending=False)
+
+        col_dwell_table, col_dwell_chart = st.columns([1.1, 1.1])
+        with col_dwell_table:
+            dwell_display = dwell_df.copy()
+            dwell_display["occurrences"] = dwell_display["occurrences"].map(fmt_int)
+            for col in ["avg_dwell_hours", "median_dwell_hours", "p90_dwell_hours"]:
+                dwell_display[col] = dwell_display[col].map(lambda v: fmt_float(v, 2))
+            st.dataframe(dwell_display, use_container_width=True, hide_index=True)
+
+        with col_dwell_chart:
+            top10_dwell = dwell_df.head(10).sort_values("avg_dwell_hours", ascending=True)
+            fig_dwell = px.bar(
+                top10_dwell,
+                x="avg_dwell_hours",
+                y="event",
+                orientation="h",
+                text_auto=".2f",
+            )
+            fig_dwell.update_traces(
+                marker_color=ACCENT,
+                hovertemplate="Event=%{y}<br>Avg Dwell=%{x:.2f} hrs<extra></extra>",
+            )
+            st.plotly_chart(
+                clayout(
+                    fig_dwell,
+                    title="Top 10 Events by Avg Dwell Hours",
+                    xtitle="Avg Dwell (hrs)",
+                    ytitle="Event",
+                    h=500,
+                ),
+                use_container_width=True,
+            )
+
+
 def main() -> None:
     with st.sidebar:
         st.title("IncidentOps")
@@ -353,7 +607,7 @@ def main() -> None:
             "Navigation",
             [
                 "Executive Overview",
-                "Process Explorer (coming soon)",
+                "Process Explorer",
                 "Bottlenecks (coming soon)",
                 "Escalations & Handoffs (coming soon)",
                 "Quality & CX (coming soon)",
@@ -374,6 +628,8 @@ def main() -> None:
 
     if page == "Executive Overview":
         render_executive_overview(db_url)
+    elif page == "Process Explorer":
+        render_process_explorer(db_url)
     else:
         render_coming_soon(page)
 
