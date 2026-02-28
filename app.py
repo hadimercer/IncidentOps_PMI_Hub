@@ -358,6 +358,76 @@ SELECT
 FROM im.v_channel_issue_summary;
 """
 
+FCR_OVERVIEW_SQL = """
+SELECT
+  COUNT(*) AS cases,
+  AVG(CASE WHEN fcr THEN 1 ELSE 0 END) AS fcr_rate,
+  AVG(cycle_hours) AS avg_cycle_hours,
+  AVG(
+    CASE
+      WHEN met_sla IS TRUE THEN 1.0
+      WHEN met_sla IS FALSE THEN 0.0
+      ELSE NULL
+    END
+  ) AS met_sla_rate,
+  AVG(customer_satisfaction) AS avg_csat,
+  AVG(CASE WHEN resolution_level = 'L1' THEN 1.0 ELSE 0.0 END) AS l1_rate,
+  AVG(CASE WHEN resolution_level = 'L2' THEN 1.0 ELSE 0.0 END) AS l2_rate,
+  AVG(CASE WHEN resolution_level = 'L3' THEN 1.0 ELSE 0.0 END) AS l3_rate
+FROM im.v_fcr_cases;
+"""
+
+FCR_LEVEL_DIST_SQL = """
+SELECT
+  resolution_level,
+  COUNT(*) AS cases
+FROM im.v_fcr_cases
+GROUP BY resolution_level;
+"""
+
+FCR_SUMMARY_SQL = """
+SELECT
+  issue_type,
+  cases,
+  fcr_rate,
+  avg_cycle_hours,
+  avg_csat,
+  met_sla_rate,
+  reopen_rate,
+  l2_escalation_rate,
+  l3_escalation_rate
+FROM im.v_fcr_summary;
+"""
+
+KB_ENABLEMENT_SQL = """
+SELECT
+  issue_type,
+  cases,
+  l1_solved_rate,
+  l2_or_l3_rate,
+  escalation_to_l2_rate,
+  reopen_rate,
+  avg_cycle_hours,
+  avg_csat,
+  enablement_score
+FROM im.v_kb_enablement_candidates;
+"""
+
+FCR_CASES_BY_ISSUE_SQL = """
+SELECT
+  case_id,
+  priority,
+  variant,
+  report_channel,
+  cycle_hours,
+  customer_satisfaction,
+  met_sla,
+  resolution_level,
+  fcr
+FROM im.v_fcr_cases
+WHERE issue_type = %s;
+"""
+
 
 def fmt_int(value: object) -> str:
     if pd.isna(value):
@@ -2294,6 +2364,355 @@ def render_channel_intake(db_url: str) -> None:
         )
 
 
+def render_knowledge_fcr(db_url: str) -> None:
+    header("Knowledge & FCR", "Analyze FCR proxy performance and prioritize knowledge/training enablement opportunities.")
+
+    try:
+        overview_df = run_query(db_url, FCR_OVERVIEW_SQL)
+        level_dist_df = run_query(db_url, FCR_LEVEL_DIST_SQL)
+        fcr_summary_df = run_query(db_url, FCR_SUMMARY_SQL)
+        kb_df = run_query(db_url, KB_ENABLEMENT_SQL)
+    except Exception as exc:
+        st.error(f"Failed to query knowledge/FCR views: {exc}")
+        st.stop()
+
+    default_issue_type: Optional[str] = None
+    if not kb_df.empty:
+        kb_sorted_for_default = kb_df.copy()
+        kb_sorted_for_default["enablement_score"] = pd.to_numeric(
+            kb_sorted_for_default["enablement_score"], errors="coerce"
+        )
+        kb_sorted_for_default = kb_sorted_for_default.sort_values("enablement_score", ascending=False)
+        if not kb_sorted_for_default.empty:
+            default_issue_type = str(kb_sorted_for_default.iloc[0]["issue_type"])
+    elif not fcr_summary_df.empty:
+        fcr_sorted_for_default = fcr_summary_df.copy()
+        fcr_sorted_for_default["cases"] = pd.to_numeric(fcr_sorted_for_default["cases"], errors="coerce")
+        fcr_sorted_for_default = fcr_sorted_for_default.sort_values("cases", ascending=False)
+        if not fcr_sorted_for_default.empty:
+            default_issue_type = str(fcr_sorted_for_default.iloc[0]["issue_type"])
+
+    if default_issue_type and "kfcr_issue_type" not in st.session_state:
+        st.session_state["kfcr_issue_type"] = default_issue_type
+
+    tabs = st.tabs(["Overview", "Enablement Backlog", "Drilldown", "Export"])
+
+    with tabs[0]:
+        st.markdown("#### FCR Proxy Overview")
+        if overview_df.empty:
+            st.info("No rows in im.v_fcr_cases.")
+        else:
+            k = overview_df.iloc[0]
+
+            row1 = st.columns(4)
+            row2 = st.columns(4)
+            with row1[0]:
+                metric_tile("FCR %", fmt_pct(k["fcr_rate"]))
+            with row1[1]:
+                metric_tile("L1 Resolution %", fmt_pct(k["l1_rate"]))
+            with row1[2]:
+                metric_tile("L2 Resolution %", fmt_pct(k["l2_rate"]))
+            with row1[3]:
+                metric_tile("L3 Resolution %", fmt_pct(k["l3_rate"]))
+            with row2[0]:
+                metric_tile("Avg Cycle (hrs)", fmt_float(k["avg_cycle_hours"]))
+            with row2[1]:
+                metric_tile("SLA Met %", fmt_pct(k["met_sla_rate"]))
+            with row2[2]:
+                metric_tile("Avg CSAT", fmt_float(k["avg_csat"]))
+            with row2[3]:
+                metric_tile("Cases", fmt_int(k["cases"]))
+
+            st.divider()
+            chart_cols = st.columns(2)
+            with chart_cols[0]:
+                if level_dist_df.empty:
+                    st.info("No resolution-level distribution rows.")
+                else:
+                    dist = level_dist_df.copy()
+                    dist["cases"] = pd.to_numeric(dist["cases"], errors="coerce")
+                    fig_dist = px.pie(dist, values="cases", names="resolution_level", hole=0.35)
+                    fig_dist.update_traces(
+                        textinfo="percent+label",
+                        hovertemplate="Level=%{label}<br>Cases=%{value}<br>Share=%{percent}<extra></extra>",
+                    )
+                    st.plotly_chart(
+                        clayout(
+                            fig_dist,
+                            title="Resolution Level Distribution",
+                            h=430,
+                        ),
+                        use_container_width=True,
+                    )
+
+            with chart_cols[1]:
+                if fcr_summary_df.empty:
+                    st.info("No rows in im.v_fcr_summary.")
+                else:
+                    fs = fcr_summary_df.copy()
+                    fs["fcr_rate"] = pd.to_numeric(fs["fcr_rate"], errors="coerce")
+                    fs["cases"] = pd.to_numeric(fs["cases"], errors="coerce")
+                    fs = fs.sort_values("fcr_rate", ascending=False)
+                    fig_fcr = px.bar(fs, x="issue_type", y="fcr_rate", text_auto=".1%")
+                    fig_fcr.update_traces(
+                        marker_color=ACCENT,
+                        hovertemplate="Issue Type=%{x}<br>FCR Rate=%{y:.1%}<extra></extra>",
+                    )
+                    st.plotly_chart(
+                        clayout(
+                            fig_fcr,
+                            title="FCR Rate by Issue Type",
+                            xtitle="Issue Type",
+                            ytitle="FCR Rate",
+                            h=430,
+                        ),
+                        use_container_width=True,
+                    )
+
+    with tabs[1]:
+        st.markdown("#### Knowledge Enablement Backlog")
+        if kb_df.empty:
+            st.info("No rows in im.v_kb_enablement_candidates.")
+        else:
+            kb = kb_df.copy()
+            for col in [
+                "cases",
+                "l1_solved_rate",
+                "l2_or_l3_rate",
+                "escalation_to_l2_rate",
+                "reopen_rate",
+                "avg_cycle_hours",
+                "avg_csat",
+                "enablement_score",
+            ]:
+                kb[col] = pd.to_numeric(kb[col], errors="coerce")
+            kb = kb.sort_values("enablement_score", ascending=False)
+
+            table_cols = [
+                "issue_type",
+                "cases",
+                "enablement_score",
+                "l1_solved_rate",
+                "l2_or_l3_rate",
+                "escalation_to_l2_rate",
+                "reopen_rate",
+                "avg_cycle_hours",
+                "avg_csat",
+            ]
+            display = kb[table_cols].copy()
+            display["cases"] = display["cases"].map(fmt_int)
+            for col in ["enablement_score", "avg_cycle_hours", "avg_csat"]:
+                display[col] = display[col].map(lambda v: fmt_float(v, 2))
+            for col in ["l1_solved_rate", "l2_or_l3_rate", "escalation_to_l2_rate", "reopen_rate"]:
+                display[col] = display[col].map(lambda v: fmt_pct(v, 1))
+            st.dataframe(display, use_container_width=True, hide_index=True)
+
+            st.divider()
+            top10 = kb.head(10).copy().sort_values("enablement_score", ascending=True)
+            fig_enable = px.bar(
+                top10,
+                x="enablement_score",
+                y="issue_type",
+                orientation="h",
+                text_auto=".2f",
+            )
+            fig_enable.update_traces(
+                marker_color=ACCENT,
+                hovertemplate="Issue Type=%{y}<br>Enablement Score=%{x:.2f}<extra></extra>",
+            )
+            st.plotly_chart(
+                clayout(
+                    fig_enable,
+                    title="Top Enablement Scores by Issue Type",
+                    xtitle="Enablement Score",
+                    ytitle="Issue Type",
+                    h=500,
+                ),
+                use_container_width=True,
+            )
+
+    with tabs[2]:
+        st.markdown("#### Issue-Type Drilldown")
+        issue_options: list[str] = []
+        if not kb_df.empty:
+            issue_options = sorted([str(v) for v in kb_df["issue_type"].dropna().unique().tolist()])
+        elif not fcr_summary_df.empty:
+            issue_options = sorted([str(v) for v in fcr_summary_df["issue_type"].dropna().unique().tolist()])
+
+        if not issue_options:
+            st.info("No issue_type values available for drilldown.")
+        else:
+            default_index = 0
+            current_issue = st.session_state.get("kfcr_issue_type")
+            if current_issue in issue_options:
+                default_index = issue_options.index(current_issue)
+
+            selected_issue = st.selectbox(
+                "Issue Type",
+                options=issue_options,
+                index=default_index,
+                key="kfcr_issue_type",
+            )
+
+            try:
+                drill_df = run_query_params(
+                    db_url,
+                    FCR_CASES_BY_ISSUE_SQL,
+                    params=(selected_issue,),
+                )
+            except Exception as exc:
+                st.error(f"Failed to query FCR drilldown cases: {exc}")
+                st.stop()
+
+            if drill_df.empty:
+                st.info("No FCR case rows for selected issue type.")
+            else:
+                drill_df["cycle_hours"] = pd.to_numeric(drill_df["cycle_hours"], errors="coerce")
+                drill_df["customer_satisfaction"] = pd.to_numeric(drill_df["customer_satisfaction"], errors="coerce")
+                drill_df["fcr"] = drill_df["fcr"].fillna(False).astype(bool)
+
+                escalated_cases = drill_df[
+                    (drill_df["resolution_level"] != "L1") | (drill_df["fcr"] == False)
+                ].sort_values("cycle_hours", ascending=False).head(200)
+                fcr_wins = drill_df[drill_df["fcr"] == True].sort_values("cycle_hours", ascending=False).head(200)
+
+                st.download_button(
+                    "Download escalated cases CSV",
+                    data=escalated_cases.to_csv(index=False).encode("utf-8"),
+                    file_name=f"fcr_escalated_cases_{selected_issue}.csv",
+                    mime="text/csv",
+                    key="dl_kfcr_escalated_cases",
+                )
+                st.download_button(
+                    "Download FCR wins CSV",
+                    data=fcr_wins.to_csv(index=False).encode("utf-8"),
+                    file_name=f"fcr_wins_{selected_issue}.csv",
+                    mime="text/csv",
+                    key="dl_kfcr_fcr_wins",
+                )
+
+                st.markdown("##### Escalated Cases (Top 200)")
+                esc_display = escalated_cases.copy()
+                esc_display["cycle_hours"] = esc_display["cycle_hours"].map(lambda v: fmt_float(v, 2))
+                esc_display["customer_satisfaction"] = esc_display["customer_satisfaction"].map(
+                    lambda v: fmt_float(v, 2)
+                )
+                st.dataframe(
+                    esc_display[
+                        [
+                            "case_id",
+                            "priority",
+                            "variant",
+                            "report_channel",
+                            "cycle_hours",
+                            "customer_satisfaction",
+                            "met_sla",
+                            "resolution_level",
+                            "fcr",
+                        ]
+                    ],
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+                st.markdown("##### FCR Wins (Top 200)")
+                win_display = fcr_wins.copy()
+                win_display["cycle_hours"] = win_display["cycle_hours"].map(lambda v: fmt_float(v, 2))
+                win_display["customer_satisfaction"] = win_display["customer_satisfaction"].map(
+                    lambda v: fmt_float(v, 2)
+                )
+                st.dataframe(
+                    win_display[
+                        [
+                            "case_id",
+                            "priority",
+                            "variant",
+                            "report_channel",
+                            "cycle_hours",
+                            "customer_satisfaction",
+                            "met_sla",
+                            "resolution_level",
+                            "fcr",
+                        ]
+                    ],
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+                hist_df = drill_df.dropna(subset=["cycle_hours"]).copy()
+                if hist_df.empty:
+                    st.info("Not enough cycle-hour values for issue-type histogram.")
+                else:
+                    fig_hist = px.histogram(hist_df, x="cycle_hours", nbins=20)
+                    fig_hist.update_traces(
+                        marker_color=ACCENT,
+                        hovertemplate="Cycle Hours=%{x:.2f}<br>Cases=%{y}<extra></extra>",
+                    )
+                    st.plotly_chart(
+                        clayout(
+                            fig_hist,
+                            title=f"Cycle Hours Distribution: {selected_issue}",
+                            xtitle="Cycle Hours",
+                            ytitle="Cases",
+                            h=430,
+                        ),
+                        use_container_width=True,
+                    )
+
+    with tabs[3]:
+        st.markdown("#### Export")
+        if kb_df.empty:
+            st.info("No rows in im.v_kb_enablement_candidates to export.")
+        else:
+            st.download_button(
+                "Download v_kb_enablement_candidates CSV",
+                data=kb_df.to_csv(index=False).encode("utf-8"),
+                file_name="v_kb_enablement_candidates.csv",
+                mime="text/csv",
+                key="dl_kfcr_kb_enablement",
+            )
+
+        if fcr_summary_df.empty:
+            st.info("No rows in im.v_fcr_summary to export.")
+        else:
+            st.download_button(
+                "Download v_fcr_summary CSV",
+                data=fcr_summary_df.to_csv(index=False).encode("utf-8"),
+                file_name="v_fcr_summary.csv",
+                mime="text/csv",
+                key="dl_kfcr_fcr_summary",
+            )
+
+        selected_issue_for_export = st.session_state.get("kfcr_issue_type", default_issue_type)
+        if selected_issue_for_export:
+            try:
+                export_cases_df = run_query_params(
+                    db_url,
+                    FCR_CASES_BY_ISSUE_SQL,
+                    params=(selected_issue_for_export,),
+                )
+            except Exception as exc:
+                st.error(f"Failed to query filtered FCR cases for export: {exc}")
+                st.stop()
+
+            st.download_button(
+                f"Download v_fcr_cases CSV ({selected_issue_for_export})",
+                data=export_cases_df.to_csv(index=False).encode("utf-8"),
+                file_name=f"v_fcr_cases_{selected_issue_for_export}.csv",
+                mime="text/csv",
+                key="dl_kfcr_filtered_cases",
+            )
+            st.caption("Filtered v_fcr_cases export can be large depending on issue-type volume.")
+        else:
+            st.info("No issue type selected for filtered v_fcr_cases export.")
+
+    with st.expander("Data Notes"):
+        st.write(
+            "FCR proxy is defined as solved by L1 with no escalation to L2/L3 and no reopen. "
+            "Use these metrics to prioritize knowledge and training investments."
+        )
+
+
 def main() -> None:
     with st.sidebar:
         st.title("IncidentOps")
@@ -2306,6 +2725,7 @@ def main() -> None:
                 "Bottlenecks",
                 "Escalations & Handoffs",
                 "Channel & Intake",
+                "Knowledge & FCR",
                 "Quality & CX",
                 "Problem Candidates",
             ],
@@ -2332,6 +2752,8 @@ def main() -> None:
         render_escalations_handoffs(db_url)
     elif page == "Channel & Intake":
         render_channel_intake(db_url)
+    elif page == "Knowledge & FCR":
+        render_knowledge_fcr(db_url)
     elif page == "Quality & CX":
         render_quality_cx(db_url)
     elif page == "Problem Candidates":
