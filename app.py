@@ -584,17 +584,12 @@ def build_sankey(transitions: pd.DataFrame, title: str, max_rows: int, height: i
 
 def normalize_neon_url(url: str) -> str:
     parsed = urlparse(url)
-    hostname = parsed.hostname or ""
-    if not hostname.startswith("ep-"):
-        return url
-
-    if "options=endpoint%3D" in parsed.query or "options=endpoint=" in parsed.query:
-        return url
-
-    endpoint_id = hostname.removesuffix("-pooler")
     query_params = parse_qsl(parsed.query, keep_blank_values=True)
-    query_params.append(("options", f"endpoint={endpoint_id}"))
-    updated_query = urlencode(query_params, doseq=True)
+    if not any(key == "options" for key, _ in query_params):
+        return url
+
+    filtered_params = [(key, value) for key, value in query_params if key != "options"]
+    updated_query = urlencode(filtered_params, doseq=True)
     return urlunparse(parsed._replace(query=updated_query))
 
 
@@ -2801,12 +2796,6 @@ def main() -> None:
         st.warning(
             "Database config missing. Set DATABASE_URL_POOLED (preferred) or DATABASE_URL_DIRECT in .env or Streamlit secrets."
         )
-        st.stop()
-
-    try:
-        get_connection(db_url)
-    except Exception as exc:
-        st.error(f"DB connection failed; check secrets and Neon endpoint status. {exc}")
         st.stop()
 
     if page == "Executive Overview":
