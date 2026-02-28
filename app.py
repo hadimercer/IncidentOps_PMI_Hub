@@ -269,6 +269,60 @@ SELECT
 FROM im.v_closure_compliance;
 """
 
+PROBLEM_CANDIDATES_SQL = """
+SELECT
+  issue_type,
+  short_description_norm,
+  cases,
+  avg_cycle_hours,
+  p90_cycle_hours,
+  avg_csat,
+  met_sla_rate,
+  reopen_rate,
+  reject_rate,
+  impact_score,
+  example_description,
+  last_seen_ts
+FROM im.v_problem_candidates;
+"""
+
+PROBLEM_CASES_BY_CANDIDATE_SQL = """
+SELECT
+  case_id,
+  priority,
+  variant,
+  report_channel,
+  cycle_hours,
+  customer_satisfaction,
+  met_sla,
+  has_reopen,
+  has_reject,
+  has_feedback,
+  short_description_raw
+FROM im.v_problem_candidate_cases
+WHERE issue_type = %s
+  AND short_description_norm = %s
+ORDER BY cycle_hours DESC
+LIMIT 200;
+"""
+
+PROBLEM_TOP_CASES_SQL = """
+SELECT
+  case_id,
+  issue_type,
+  priority,
+  variant,
+  report_channel,
+  cycle_hours,
+  customer_satisfaction,
+  met_sla,
+  has_reopen,
+  has_reject,
+  short_description_raw,
+  short_description_norm
+FROM im.v_problem_candidate_top_cases;
+"""
+
 
 def fmt_int(value: object) -> str:
     if pd.isna(value):
@@ -436,6 +490,12 @@ def get_connection(db_url: str):
 def run_query(db_url: str, sql: str) -> pd.DataFrame:
     conn = get_connection(db_url)
     return pd.read_sql_query(sql, conn)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def run_query_params(db_url: str, sql: str, params: tuple[object, ...]) -> pd.DataFrame:
+    conn = get_connection(db_url)
+    return pd.read_sql_query(sql, conn, params=params)
 
 
 def render_coming_soon(page_name: str) -> None:
@@ -1543,6 +1603,301 @@ def render_quality_cx(db_url: str) -> None:
         )
 
 
+def render_problem_candidates(db_url: str) -> None:
+    header("Problem Candidates", "Rank recurring clusters for prevention backlog planning and evidence-based drilldown.")
+
+    try:
+        backlog_df = run_query(db_url, PROBLEM_CANDIDATES_SQL)
+        top_cases_df = run_query(db_url, PROBLEM_TOP_CASES_SQL)
+    except Exception as exc:
+        st.error(f"Failed to query problem-candidate views: {exc}")
+        st.stop()
+
+    tabs = st.tabs(["Backlog", "Drilldown", "Top Cases", "Export"])
+
+    selected_issue_type: Optional[str] = None
+    selected_norm: Optional[str] = None
+
+    with tabs[0]:
+        st.markdown("#### Ranked Prevention Backlog")
+        if backlog_df.empty:
+            st.info("No rows in im.v_problem_candidates.")
+        else:
+            df = backlog_df.copy()
+            for col in [
+                "cases",
+                "impact_score",
+                "avg_cycle_hours",
+                "p90_cycle_hours",
+                "avg_csat",
+                "met_sla_rate",
+                "reopen_rate",
+                "reject_rate",
+            ]:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+
+            filter_cols = st.columns([1.4, 1.0])
+            with filter_cols[0]:
+                issue_options = sorted([str(v) for v in df["issue_type"].dropna().unique().tolist()])
+                selected_issue_types = st.multiselect("Issue Type", options=issue_options, default=issue_options)
+            with filter_cols[1]:
+                max_cases = int(df["cases"].dropna().max()) if not df["cases"].dropna().empty else 10
+                min_cases = st.slider("Minimum Cases", min_value=1, max_value=max(max_cases, 1), value=min(10, max_cases))
+
+            filtered = df.copy()
+            if selected_issue_types:
+                filtered = filtered[filtered["issue_type"].astype(str).isin(selected_issue_types)]
+            else:
+                filtered = filtered.iloc[0:0]
+            filtered = filtered[filtered["cases"] >= min_cases]
+            filtered = filtered.sort_values(["impact_score", "cases"], ascending=[False, False])
+
+            view_cols = [
+                "issue_type",
+                "cases",
+                "impact_score",
+                "avg_cycle_hours",
+                "p90_cycle_hours",
+                "avg_csat",
+                "met_sla_rate",
+                "reopen_rate",
+                "reject_rate",
+                "last_seen_ts",
+                "example_description",
+            ]
+            display = filtered[view_cols].copy()
+            display["cases"] = display["cases"].map(fmt_int)
+            for col in ["impact_score", "avg_cycle_hours", "p90_cycle_hours", "avg_csat"]:
+                display[col] = display[col].map(lambda v: fmt_float(v, 2))
+            for col in ["met_sla_rate", "reopen_rate", "reject_rate"]:
+                display[col] = display[col].map(lambda v: fmt_pct(v, 1))
+            st.dataframe(display, use_container_width=True, hide_index=True)
+
+            st.divider()
+            chart_cols = st.columns(2)
+            with chart_cols[0]:
+                chart_df = filtered.head(15).copy()
+                chart_df["candidate_label"] = chart_df.apply(
+                    lambda r: f"{r['issue_type']} | {str(r['short_description_norm'])[:34]}"
+                    + ("..." if len(str(r["short_description_norm"])) > 34 else ""),
+                    axis=1,
+                )
+                fig_impact = px.bar(
+                    chart_df.sort_values("impact_score", ascending=True),
+                    x="impact_score",
+                    y="candidate_label",
+                    orientation="h",
+                    text_auto=".2f",
+                )
+                fig_impact.update_traces(
+                    marker_color=ACCENT,
+                    hovertemplate="Candidate=%{y}<br>Impact=%{x:.2f}<extra></extra>",
+                )
+                st.plotly_chart(
+                    clayout(
+                        fig_impact,
+                        title="Impact Score by Candidate (Top 15)",
+                        xtitle="Impact Score",
+                        ytitle="Issue | Description",
+                        h=520,
+                    ),
+                    use_container_width=True,
+                )
+
+            with chart_cols[1]:
+                scatter_df = filtered.copy()
+                fig_scatter = px.scatter(
+                    scatter_df,
+                    x="cases",
+                    y="avg_cycle_hours",
+                    size="impact_score",
+                    color="issue_type",
+                    hover_name="example_description",
+                    size_max=56,
+                )
+                fig_scatter.update_traces(
+                    marker=dict(line=dict(width=1, color="rgba(250,250,250,0.35)"), opacity=0.82),
+                    hovertemplate=(
+                        "Desc=%{hovertext}<br>Cases=%{x:.0f}<br>Avg Cycle=%{y:.2f} hrs"
+                        "<extra></extra>"
+                    ),
+                )
+                st.plotly_chart(
+                    clayout(
+                        fig_scatter,
+                        title="Cases vs Avg Cycle (Bubble Size = Impact)",
+                        xtitle="Cases",
+                        ytitle="Avg Cycle Hours",
+                        h=520,
+                    ),
+                    use_container_width=True,
+                )
+
+            if filtered.empty:
+                st.info("No candidates match current filters.")
+            else:
+                candidate_options = filtered.apply(
+                    lambda r: f"{r['issue_type']} || {r['short_description_norm']}",
+                    axis=1,
+                ).tolist()
+                selected_key = st.selectbox("Candidate", options=candidate_options, index=0, key="problem_candidate_key")
+                selected_issue_type, selected_norm = selected_key.split(" || ", 1)
+                selected_row = filtered[
+                    (filtered["issue_type"] == selected_issue_type)
+                    & (filtered["short_description_norm"] == selected_norm)
+                ].iloc[0]
+                st.info(
+                    "Candidate Summary: "
+                    f"cases={fmt_int(selected_row['cases'])}, "
+                    f"impact={fmt_float(selected_row['impact_score'])}, "
+                    f"avg_cycle={fmt_float(selected_row['avg_cycle_hours'])} hrs, "
+                    f"sla_met={fmt_pct(selected_row['met_sla_rate'])}, "
+                    f"reopen={fmt_pct(selected_row['reopen_rate'])}, "
+                    f"reject={fmt_pct(selected_row['reject_rate'])}"
+                )
+
+    with tabs[1]:
+        st.markdown("#### Candidate Drilldown")
+        if backlog_df.empty:
+            st.info("No candidate selected because backlog is empty.")
+        else:
+            if not selected_issue_type or not selected_norm:
+                st.info("Select a candidate in Backlog to load drilldown cases.")
+            else:
+                try:
+                    drill_df = run_query_params(
+                        db_url,
+                        PROBLEM_CASES_BY_CANDIDATE_SQL,
+                        params=(selected_issue_type, selected_norm),
+                    )
+                except Exception as exc:
+                    st.error(f"Failed to query candidate drilldown: {exc}")
+                    st.stop()
+
+                st.caption(f"Selected candidate: {selected_issue_type} | {selected_norm}")
+                if drill_df.empty:
+                    st.info("No cases found for selected candidate.")
+                else:
+                    for col in ["cycle_hours", "customer_satisfaction"]:
+                        drill_df[col] = pd.to_numeric(drill_df[col], errors="coerce")
+
+                    st.download_button(
+                        "Download candidate cases CSV",
+                        data=drill_df.to_csv(index=False).encode("utf-8"),
+                        file_name="problem_candidate_cases.csv",
+                        mime="text/csv",
+                    )
+
+                    drill_display = drill_df.copy()
+                    drill_display["cycle_hours"] = drill_display["cycle_hours"].map(lambda v: fmt_float(v, 2))
+                    drill_display["customer_satisfaction"] = drill_display["customer_satisfaction"].map(
+                        lambda v: fmt_float(v, 2)
+                    )
+                    st.dataframe(
+                        drill_display[
+                            [
+                                "case_id",
+                                "priority",
+                                "variant",
+                                "report_channel",
+                                "cycle_hours",
+                                "customer_satisfaction",
+                                "met_sla",
+                                "has_reopen",
+                                "has_reject",
+                                "has_feedback",
+                                "short_description_raw",
+                            ]
+                        ],
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+                    hist_df = drill_df.dropna(subset=["cycle_hours"]).copy()
+                    if hist_df.empty:
+                        st.info("Not enough cycle-hour values for histogram.")
+                    else:
+                        fig_hist = px.histogram(hist_df, x="cycle_hours", nbins=20)
+                        fig_hist.update_traces(
+                            marker_color=ACCENT,
+                            hovertemplate="Cycle Hours=%{x:.2f}<br>Cases=%{y}<extra></extra>",
+                        )
+                        st.plotly_chart(
+                            clayout(
+                                fig_hist,
+                                title="Cycle Hours Distribution (Selected Candidate)",
+                                xtitle="Cycle Hours",
+                                ytitle="Cases",
+                                h=460,
+                            ),
+                            use_container_width=True,
+                        )
+
+    with tabs[2]:
+        st.markdown("#### Top Candidate Cases")
+        if top_cases_df.empty:
+            st.info("No rows in im.v_problem_candidate_top_cases.")
+        else:
+            tc = top_cases_df.copy()
+            tc["cycle_hours"] = pd.to_numeric(tc["cycle_hours"], errors="coerce")
+            tc["customer_satisfaction"] = pd.to_numeric(tc["customer_satisfaction"], errors="coerce")
+
+            filter_cols = st.columns(2)
+            with filter_cols[0]:
+                issue_options = sorted([str(v) for v in tc["issue_type"].dropna().unique().tolist()])
+                issue_filter = st.multiselect("Issue Type", options=issue_options, default=issue_options, key="top_issue")
+            with filter_cols[1]:
+                priority_options = sorted([str(v) for v in tc["priority"].dropna().unique().tolist()])
+                priority_filter = st.multiselect("Priority", options=priority_options, default=priority_options, key="top_priority")
+
+            if issue_filter:
+                tc = tc[tc["issue_type"].astype(str).isin(issue_filter)]
+            else:
+                tc = tc.iloc[0:0]
+            if priority_filter:
+                tc = tc[tc["priority"].astype(str).isin(priority_filter)]
+            else:
+                tc = tc.iloc[0:0]
+
+            st.download_button(
+                "Download filtered top cases CSV",
+                data=tc.to_csv(index=False).encode("utf-8"),
+                file_name="problem_candidate_top_cases_filtered.csv",
+                mime="text/csv",
+            )
+
+            tc_display = tc.copy()
+            tc_display["cycle_hours"] = tc_display["cycle_hours"].map(lambda v: fmt_float(v, 2))
+            tc_display["customer_satisfaction"] = tc_display["customer_satisfaction"].map(lambda v: fmt_float(v, 2))
+            st.dataframe(tc_display, use_container_width=True, hide_index=True)
+
+    with tabs[3]:
+        st.markdown("#### Export")
+        if backlog_df.empty:
+            st.info("No backlog rows to export.")
+        else:
+            st.download_button(
+                "Download full backlog CSV",
+                data=backlog_df.to_csv(index=False).encode("utf-8"),
+                file_name="v_problem_candidates.csv",
+                mime="text/csv",
+            )
+
+        if top_cases_df.empty:
+            st.info("No top-case rows to export.")
+        else:
+            st.download_button(
+                "Download top cases CSV",
+                data=top_cases_df.to_csv(index=False).encode("utf-8"),
+                file_name="v_problem_candidate_top_cases.csv",
+                mime="text/csv",
+            )
+
+        st.write(
+            "Use backlog to pick prevention epics; use drilldown to create a problem record with evidence."
+        )
+
+
 def main() -> None:
     with st.sidebar:
         st.title("IncidentOps")
@@ -1555,7 +1910,7 @@ def main() -> None:
                 "Bottlenecks",
                 "Escalations & Handoffs",
                 "Quality & CX",
-                "Problem Candidates (coming soon)",
+                "Problem Candidates",
             ],
         )
 
@@ -1580,6 +1935,8 @@ def main() -> None:
         render_escalations_handoffs(db_url)
     elif page == "Quality & CX":
         render_quality_cx(db_url)
+    elif page == "Problem Candidates":
+        render_problem_candidates(db_url)
     else:
         render_coming_soon(page)
 
