@@ -599,6 +599,194 @@ def render_process_explorer(db_url: str) -> None:
             )
 
 
+def render_bottlenecks(db_url: str) -> None:
+    header("Bottlenecks", "Identify where time is lost across steps and handoffs.")
+    st.caption("Dwell time = time spent in a step before the next event.")
+    st.caption("Transition time = delay between specific handoffs.")
+
+    try:
+        dwell_df = run_query(db_url, DWELL_SQL)
+        transition_df = run_query(db_url, TRANSITION_SUMMARY_SQL)
+    except Exception as exc:
+        st.error(f"Failed to query bottleneck views: {exc}")
+        st.stop()
+
+    st.divider()
+    st.markdown("#### Top Dwell Time Steps")
+    if dwell_df.empty:
+        st.info("No rows in im.v_dwell_by_event.")
+    else:
+        dwell_df = dwell_df.copy()
+        dwell_df["occurrences"] = pd.to_numeric(dwell_df["occurrences"], errors="coerce")
+        for col in ["avg_dwell_hours", "median_dwell_hours", "p90_dwell_hours"]:
+            dwell_df[col] = pd.to_numeric(dwell_df[col], errors="coerce")
+        dwell_df = dwell_df.sort_values("avg_dwell_hours", ascending=False)
+
+        col_dwell_table, col_dwell_chart = st.columns([1.1, 1.1])
+        with col_dwell_table:
+            dwell_display = dwell_df.copy()
+            dwell_display["occurrences"] = dwell_display["occurrences"].map(fmt_int)
+            for col in ["avg_dwell_hours", "median_dwell_hours", "p90_dwell_hours"]:
+                dwell_display[col] = dwell_display[col].map(lambda v: fmt_float(v, 2))
+            st.dataframe(
+                dwell_display[["event", "occurrences", "avg_dwell_hours", "median_dwell_hours", "p90_dwell_hours"]],
+                use_container_width=True,
+                hide_index=True,
+            )
+
+        with col_dwell_chart:
+            top10_dwell = dwell_df.head(10).copy().sort_values("avg_dwell_hours", ascending=True)
+            fig_dwell = px.bar(
+                top10_dwell,
+                x="event",
+                y="avg_dwell_hours",
+                text_auto=".2f",
+            )
+            fig_dwell.update_traces(
+                marker_color=ACCENT,
+                hovertemplate="Event=%{x}<br>Avg Dwell=%{y:.2f} hrs<extra></extra>",
+            )
+            st.plotly_chart(
+                clayout(
+                    fig_dwell,
+                    title="Top 10 Dwell Steps by Avg Hours",
+                    xtitle="Event",
+                    ytitle="Avg Dwell (hrs)",
+                    h=500,
+                ),
+                use_container_width=True,
+            )
+
+    st.divider()
+    st.markdown("#### Slowest Transitions")
+    if transition_df.empty:
+        st.info("No rows in im.v_transition_summary.")
+    else:
+        transition_df = transition_df.copy()
+        transition_df["transition_count"] = pd.to_numeric(transition_df["transition_count"], errors="coerce")
+        for col in ["avg_delta_hours", "median_delta_hours", "p90_delta_hours"]:
+            transition_df[col] = pd.to_numeric(transition_df[col], errors="coerce")
+        transition_df = transition_df.dropna(subset=["transition_count", "p90_delta_hours"])
+
+        col_transition_tables, col_transition_chart = st.columns([1.2, 1.0])
+
+        with col_transition_tables:
+            tab_slowest, tab_common = st.tabs(["Top by P90 Delay", "Top by Frequency"])
+
+            with tab_slowest:
+                slowest15 = transition_df.sort_values("p90_delta_hours", ascending=False).head(15).copy()
+                slowest15_display = slowest15.copy()
+                slowest15_display["transition_count"] = slowest15_display["transition_count"].map(fmt_int)
+                for col in ["avg_delta_hours", "median_delta_hours", "p90_delta_hours"]:
+                    slowest15_display[col] = slowest15_display[col].map(lambda v: fmt_float(v, 2))
+                st.dataframe(
+                    slowest15_display[
+                        [
+                            "from_event",
+                            "to_event",
+                            "transition_count",
+                            "avg_delta_hours",
+                            "median_delta_hours",
+                            "p90_delta_hours",
+                        ]
+                    ],
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+            with tab_common:
+                common15 = transition_df.sort_values("transition_count", ascending=False).head(15).copy()
+                common15_display = common15.copy()
+                common15_display["transition_count"] = common15_display["transition_count"].map(fmt_int)
+                for col in ["avg_delta_hours", "median_delta_hours", "p90_delta_hours"]:
+                    common15_display[col] = common15_display[col].map(lambda v: fmt_float(v, 2))
+                st.dataframe(
+                    common15_display[
+                        [
+                            "from_event",
+                            "to_event",
+                            "transition_count",
+                            "avg_delta_hours",
+                            "median_delta_hours",
+                            "p90_delta_hours",
+                        ]
+                    ],
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+        with col_transition_chart:
+            top10_slowest = transition_df.sort_values("p90_delta_hours", ascending=False).head(10).copy()
+            if top10_slowest.empty:
+                st.info("Not enough transition data for slowest-transition chart.")
+            else:
+                top10_slowest["transition_label"] = (
+                    top10_slowest["from_event"].astype(str) + " -> " + top10_slowest["to_event"].astype(str)
+                )
+                top10_slowest = top10_slowest.sort_values("p90_delta_hours", ascending=True)
+                fig_slow = px.bar(
+                    top10_slowest,
+                    x="p90_delta_hours",
+                    y="transition_label",
+                    orientation="h",
+                    text_auto=".2f",
+                )
+                fig_slow.update_traces(
+                    marker_color="#7FE0D6",
+                    hovertemplate="Transition=%{y}<br>P90 Delay=%{x:.2f} hrs<extra></extra>",
+                )
+                st.plotly_chart(
+                    clayout(
+                        fig_slow,
+                        title="Top 10 Slowest Transitions (P90)",
+                        xtitle="P90 Delay (hrs)",
+                        ytitle="Transition",
+                        h=500,
+                    ),
+                    use_container_width=True,
+                )
+
+    st.divider()
+    st.markdown("#### Insights")
+    insights: list[str] = []
+    if not dwell_df.empty:
+        dwell_num = dwell_df.copy()
+        dwell_num["avg_dwell_hours"] = pd.to_numeric(dwell_num["avg_dwell_hours"], errors="coerce")
+        dwell_num = dwell_num.dropna(subset=["avg_dwell_hours"])
+        if not dwell_num.empty:
+            top_step = dwell_num.sort_values("avg_dwell_hours", ascending=False).iloc[0]
+            insights.append(f"Longest dwell step: {top_step['event']} (~{float(top_step['avg_dwell_hours']):.2f} hrs avg)")
+
+    if not transition_df.empty:
+        trans_num = transition_df.copy()
+        trans_num["p90_delta_hours"] = pd.to_numeric(trans_num["p90_delta_hours"], errors="coerce")
+        trans_num = trans_num.dropna(subset=["p90_delta_hours"])
+        if not trans_num.empty:
+            top_transition = trans_num.sort_values("p90_delta_hours", ascending=False).iloc[0]
+            insights.append(
+                "Highest p90 transition: "
+                f"{top_transition['from_event']} -> {top_transition['to_event']} "
+                f"(~{float(top_transition['p90_delta_hours']):.2f} hrs p90)"
+            )
+        if len(trans_num) > 1:
+            top_common = trans_num.sort_values("transition_count", ascending=False).iloc[0]
+            insights.append(
+                "Most frequent transition: "
+                f"{top_common['from_event']} -> {top_common['to_event']} "
+                f"({int(top_common['transition_count']):,} transitions)"
+            )
+
+    if insights:
+        st.markdown("\n".join([f"- {item}" for item in insights[:3]]))
+    else:
+        st.info("No callouts available yet. Load data to compute dwell/transition metrics.")
+
+    with st.expander("Data Notes"):
+        st.write(
+            "These metrics are computed from event timestamps and should be used to identify process friction, not individual performance."
+        )
+
+
 def main() -> None:
     with st.sidebar:
         st.title("IncidentOps")
@@ -608,7 +796,7 @@ def main() -> None:
             [
                 "Executive Overview",
                 "Process Explorer",
-                "Bottlenecks (coming soon)",
+                "Bottlenecks",
                 "Escalations & Handoffs (coming soon)",
                 "Quality & CX (coming soon)",
                 "Problem Candidates (coming soon)",
@@ -630,6 +818,8 @@ def main() -> None:
         render_executive_overview(db_url)
     elif page == "Process Explorer":
         render_process_explorer(db_url)
+    elif page == "Bottlenecks":
+        render_bottlenecks(db_url)
     else:
         render_coming_soon(page)
 
