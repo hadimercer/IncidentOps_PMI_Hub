@@ -181,3 +181,83 @@ WHERE ves.next_ts IS NOT NULL
   AND ves.delta_hours IS NOT NULL
   AND ves.delta_hours >= 0
 GROUP BY ves.variant, ves.event, ves.next_event;
+
+CREATE OR REPLACE VIEW im.v_pingpong_cases AS
+WITH pingpong AS (
+    SELECT
+        ves.case_id,
+        COUNT(*) AS pingpong_transitions
+    FROM im.v_event_seq ves
+    WHERE (
+        ves.event ILIKE '%level 2%'
+        AND ves.next_event ILIKE '%level 3%'
+    ) OR (
+        ves.event ILIKE '%level 3%'
+        AND ves.next_event ILIKE '%level 2%'
+    )
+    GROUP BY ves.case_id
+)
+SELECT
+    vcs.case_id,
+    vcs.variant,
+    vcs.priority,
+    vcs.issue_type,
+    vcs.report_channel,
+    vcs.cycle_hours,
+    vcs.customer_satisfaction,
+    vcs.escalation_count,
+    vcs.resolver_changes,
+    p.pingpong_transitions,
+    vcs.has_reopen,
+    vcs.has_reject,
+    vcs.met_sla
+FROM pingpong p
+JOIN im.v_case_sla vcs
+    ON vcs.case_id = p.case_id;
+
+CREATE OR REPLACE VIEW im.v_handoff_summary AS
+SELECT
+    vcs.variant,
+    vcs.issue_type,
+    COUNT(*) AS cases,
+    AVG(vcs.cycle_hours) AS avg_cycle_hours,
+    percentile_cont(0.9) WITHIN GROUP (ORDER BY vcs.cycle_hours) AS p90_cycle_hours,
+    AVG(vcs.customer_satisfaction) AS avg_csat,
+    AVG(
+        CASE
+            WHEN vcs.met_sla IS TRUE THEN 1.0
+            WHEN vcs.met_sla IS FALSE THEN 0.0
+            ELSE NULL
+        END
+    ) AS met_sla_rate,
+    AVG(vcs.escalation_count::double precision) AS avg_escalations,
+    AVG(vcs.resolver_changes::double precision) AS avg_resolver_changes,
+    AVG(CASE WHEN vcs.resolver_changes >= 1 THEN 1.0 ELSE 0.0 END) AS handoff_rate,
+    AVG(CASE WHEN vcs.resolver_changes >= 3 THEN 1.0 ELSE 0.0 END) AS high_handoff_rate,
+    AVG(CASE WHEN vpc.case_id IS NOT NULL THEN 1.0 ELSE 0.0 END) AS pingpong_rate
+FROM im.v_case_sla vcs
+LEFT JOIN im.v_pingpong_cases vpc
+    ON vpc.case_id = vcs.case_id
+GROUP BY vcs.variant, vcs.issue_type;
+
+CREATE OR REPLACE VIEW im.v_worst_handoff_cases AS
+SELECT
+    vcs.case_id,
+    vcs.variant,
+    vcs.priority,
+    vcs.issue_type,
+    vcs.report_channel,
+    vcs.cycle_hours,
+    vcs.customer_satisfaction,
+    vcs.met_sla,
+    vcs.escalation_count,
+    vcs.resolver_changes,
+    vcs.has_reopen,
+    vcs.has_reject,
+    vcs.has_feedback
+FROM im.v_case_sla vcs
+ORDER BY
+    vcs.resolver_changes DESC,
+    vcs.escalation_count DESC,
+    vcs.cycle_hours DESC
+LIMIT 200;
