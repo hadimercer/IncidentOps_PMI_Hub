@@ -47,6 +47,95 @@ FROM (
     FROM im.event_raw er
 ) s;
 
--- TODO: add case-level summary view(s), e.g., cycle time and first-time-fix KPIs.
--- TODO: add transition-level aggregation view(s), e.g., edge frequencies and median wait time.
--- TODO: add bottleneck and variant analytics view(s).
+CREATE OR REPLACE VIEW im.v_case AS
+WITH case_rollup AS (
+    SELECT
+        er.case_id,
+        MAX(er.variant) AS variant,
+        MAX(er.priority) AS priority,
+        MAX(er.issue_type) AS issue_type,
+        MAX(er.report_channel) AS report_channel,
+        MIN(er.ts) FILTER (WHERE er.event = 'Ticket created') AS created_at,
+        MAX(er.ts) FILTER (WHERE er.event = 'Ticket closed') AS closed_at,
+        COUNT(*) AS event_count,
+        COUNT(DISTINCT er.resolver) FILTER (
+            WHERE er.resolver IS NOT NULL
+              AND er.resolver <> ''
+        ) AS distinct_resolvers,
+        COUNT(*) FILTER (WHERE er.event ILIKE 'Ticket escalated%') AS escalation_count,
+        BOOL_OR(er.event = 'Customer feedback received') AS has_feedback,
+        BOOL_OR(er.event ILIKE '%reopen%') AS has_reopen,
+        BOOL_OR(er.event ILIKE '%reject%') AS has_reject,
+        MAX(er.customer_satisfaction) AS customer_satisfaction
+    FROM im.event_raw er
+    GROUP BY er.case_id
+)
+SELECT
+    cr.case_id,
+    cr.variant,
+    cr.priority,
+    cr.issue_type,
+    cr.report_channel,
+    cr.created_at,
+    cr.closed_at,
+    EXTRACT(EPOCH FROM (cr.closed_at - cr.created_at)) / 3600.0 AS cycle_hours,
+    cr.event_count,
+    cr.distinct_resolvers,
+    GREATEST(cr.distinct_resolvers - 1, 0) AS resolver_changes,
+    cr.escalation_count,
+    cr.has_feedback,
+    cr.has_reopen,
+    cr.has_reject,
+    cr.customer_satisfaction
+FROM case_rollup cr
+WHERE cr.created_at IS NOT NULL
+  AND cr.closed_at IS NOT NULL
+  AND cr.closed_at >= cr.created_at;
+
+CREATE OR REPLACE VIEW im.v_case_sla AS
+SELECT
+    vc.case_id,
+    vc.variant,
+    vc.priority,
+    vc.issue_type,
+    vc.report_channel,
+    vc.created_at,
+    vc.closed_at,
+    vc.cycle_hours,
+    vc.event_count,
+    vc.distinct_resolvers,
+    vc.resolver_changes,
+    vc.escalation_count,
+    vc.has_feedback,
+    vc.has_reopen,
+    vc.has_reject,
+    vc.customer_satisfaction,
+    sp.target_hours,
+    CASE
+        WHEN sp.target_hours IS NULL THEN NULL
+        ELSE vc.cycle_hours <= sp.target_hours::double precision
+    END AS met_sla
+FROM im.v_case vc
+LEFT JOIN im.sla_policy sp
+    ON sp.priority = vc.priority;
+
+CREATE OR REPLACE VIEW im.v_variant_summary AS
+SELECT
+    vcs.variant,
+    COUNT(*) AS cases,
+    AVG(vcs.cycle_hours) AS avg_cycle_hours,
+    percentile_cont(0.90) WITHIN GROUP (ORDER BY vcs.cycle_hours) AS p90_cycle_hours,
+    AVG(vcs.customer_satisfaction) AS avg_csat,
+    AVG(
+        CASE
+            WHEN vcs.met_sla IS TRUE THEN 1.0
+            WHEN vcs.met_sla IS FALSE THEN 0.0
+            ELSE NULL
+        END
+    ) AS met_sla_rate,
+    AVG(CASE WHEN vcs.has_reopen THEN 1.0 ELSE 0.0 END) AS reopen_rate,
+    AVG(CASE WHEN vcs.has_reject THEN 1.0 ELSE 0.0 END) AS reject_rate,
+    AVG(vcs.escalation_count::double precision) AS avg_escalations,
+    AVG(vcs.resolver_changes::double precision) AS avg_resolver_changes
+FROM im.v_case_sla vcs
+GROUP BY vcs.variant;
