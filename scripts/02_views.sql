@@ -352,3 +352,110 @@ SELECT
     AVG(vcc.cycle_hours) AS avg_cycle_hours
 FROM im.v_closure_compliance vcc
 GROUP BY vcc.issue_type, vcc.priority;
+
+CREATE OR REPLACE VIEW im.v_problem_candidate_cases AS
+WITH case_descriptions AS (
+    SELECT
+        er.case_id,
+        MAX(er.short_description) AS short_description_raw,
+        NULLIF(
+            trim(
+                regexp_replace(
+                    regexp_replace(
+                        lower(COALESCE(MAX(er.short_description), '')),
+                        '[^a-z\s]+',
+                        ' ',
+                        'g'
+                    ),
+                    '\s+',
+                    ' ',
+                    'g'
+                )
+            ),
+            ''
+        ) AS short_description_norm
+    FROM im.event_raw er
+    GROUP BY er.case_id
+)
+SELECT
+    vcs.case_id,
+    vcs.issue_type,
+    vcs.priority,
+    vcs.variant,
+    vcs.report_channel,
+    vcs.cycle_hours,
+    vcs.customer_satisfaction,
+    vcs.met_sla,
+    vcs.has_reopen,
+    vcs.has_reject,
+    vcs.has_feedback,
+    cd.short_description_raw,
+    cd.short_description_norm
+FROM im.v_case_sla vcs
+LEFT JOIN case_descriptions cd
+    ON cd.case_id = vcs.case_id;
+
+CREATE OR REPLACE VIEW im.v_problem_candidates AS
+WITH candidate_agg AS (
+    SELECT
+        vpcc.issue_type,
+        vpcc.short_description_norm,
+        COUNT(*) AS cases,
+        AVG(vpcc.cycle_hours) AS avg_cycle_hours,
+        percentile_cont(0.9) WITHIN GROUP (ORDER BY vpcc.cycle_hours) AS p90_cycle_hours,
+        AVG(vpcc.customer_satisfaction) AS avg_csat,
+        AVG(
+            CASE
+                WHEN vpcc.met_sla IS TRUE THEN 1.0
+                WHEN vpcc.met_sla IS FALSE THEN 0.0
+                ELSE NULL
+            END
+        ) AS met_sla_rate,
+        AVG(CASE WHEN vpcc.has_reopen THEN 1.0 ELSE 0.0 END) AS reopen_rate,
+        AVG(CASE WHEN vpcc.has_reject THEN 1.0 ELSE 0.0 END) AS reject_rate,
+        MIN(vpcc.short_description_raw) AS example_description,
+        MAX(vc.closed_at) AS last_seen_ts
+    FROM im.v_problem_candidate_cases vpcc
+    LEFT JOIN im.v_case vc
+        ON vc.case_id = vpcc.case_id
+    WHERE vpcc.short_description_norm IS NOT NULL
+    GROUP BY vpcc.issue_type, vpcc.short_description_norm
+)
+SELECT
+    ca.issue_type,
+    ca.short_description_norm,
+    ca.cases,
+    ca.avg_cycle_hours,
+    ca.p90_cycle_hours,
+    ca.avg_csat,
+    ca.met_sla_rate,
+    ca.reopen_rate,
+    ca.reject_rate,
+    (
+        ca.cases * (1.0 - COALESCE(ca.met_sla_rate, 0.0)) * (COALESCE(ca.avg_cycle_hours, 0.0) / 10.0)
+        + ca.cases * (COALESCE(ca.reopen_rate, 0.0) + COALESCE(ca.reject_rate, 0.0))
+    ) AS impact_score,
+    ca.example_description,
+    ca.last_seen_ts
+FROM candidate_agg ca;
+
+CREATE OR REPLACE VIEW im.v_problem_candidate_top_cases AS
+SELECT
+    vpcc.case_id,
+    vpcc.issue_type,
+    vpcc.priority,
+    vpcc.variant,
+    vpcc.report_channel,
+    vpcc.cycle_hours,
+    vpcc.customer_satisfaction,
+    vpcc.met_sla,
+    vpcc.has_reopen,
+    vpcc.has_reject,
+    vpcc.short_description_raw,
+    vpcc.short_description_norm
+FROM im.v_problem_candidate_cases vpcc
+ORDER BY
+    vpcc.cycle_hours DESC,
+    vpcc.has_reopen DESC,
+    vpcc.has_reject DESC
+LIMIT 500;
