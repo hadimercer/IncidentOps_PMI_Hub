@@ -846,7 +846,7 @@ def render_process_explorer(db_url: str) -> None:
         st.stop()
 
     st.markdown("#### A) Variant Leaderboard")
-    selected_variant: Optional[str] = None
+    variant_options: list[str] = []
     variants_sorted = pd.DataFrame()
     if variant_df.empty:
         st.info("No rows in im.v_variant_summary.")
@@ -862,61 +862,49 @@ def render_process_explorer(db_url: str) -> None:
         variant_options = [
             str(v) for v in variants_sorted["variant"].tolist() if pd.notna(v) and str(v).strip() != ""
         ]
-        if variant_options:
-            selected_variant = st.selectbox(
-                "Variant drilldown",
-                options=variant_options,
-                index=0,
-                key="process_explorer_variant_drilldown",
-            )
+
+        table_cols = [
+            "variant",
+            "cases",
+            "avg_cycle_hours",
+            "p90_cycle_hours",
+            "avg_csat",
+            "met_sla_rate",
+            "reopen_rate",
+            "reject_rate",
+            "avg_escalations",
+            "avg_resolver_changes",
+        ]
+        top_variants = variants_sorted[table_cols].head(20).copy()
+        top_variants["cases"] = top_variants["cases"].astype("Int64")
+        st.dataframe(
+            style_table(
+                top_variants,
+                pct_cols={"met_sla_rate", "reopen_rate", "reject_rate"},
+                hour_cols={"avg_cycle_hours", "p90_cycle_hours"},
+                good_high_cols={"cases", "met_sla_rate"},
+                good_low_cols={"avg_cycle_hours", "p90_cycle_hours", "reopen_rate", "reject_rate"},
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        chart_df = variants_sorted.dropna(subset=["variant", "cases"]).head(15).copy()
+        if chart_df.empty:
+            st.info("Not enough variant data for charting.")
         else:
-            st.info("No variant values available for drilldown.")
-
-        block_a_table, block_a_chart = st.columns([1.2, 1.0])
-        with block_a_table:
-            table_cols = [
-                "variant",
-                "cases",
-                "avg_cycle_hours",
-                "p90_cycle_hours",
-                "avg_csat",
-                "met_sla_rate",
-                "reopen_rate",
-                "reject_rate",
-                "avg_escalations",
-                "avg_resolver_changes",
-            ]
-            top_variants = variants_sorted[table_cols].head(20).copy()
-            top_variants["cases"] = top_variants["cases"].astype("Int64")
-            st.dataframe(
-                style_table(
-                    top_variants,
-                    pct_cols={"met_sla_rate", "reopen_rate", "reject_rate"},
-                    hour_cols={"avg_cycle_hours", "p90_cycle_hours"},
-                    good_high_cols={"cases", "met_sla_rate"},
-                    good_low_cols={"avg_cycle_hours", "p90_cycle_hours", "reopen_rate", "reject_rate"},
-                ),
-                use_container_width=True,
-                hide_index=True,
+            fig_cases = px.bar(
+                chart_df,
+                x="variant",
+                y="cases",
+                color="variant",
+                text_auto=True,
             )
-
-        with block_a_chart:
-            chart_df = variants_sorted.dropna(subset=["variant", "cases"]).head(15).copy()
-            if chart_df.empty:
-                st.info("Not enough variant data for charting.")
-            else:
-                fig_cases = px.bar(
-                    chart_df,
-                    x="variant",
-                    y="cases",
-                    color="variant",
-                    text_auto=True,
-                )
-                fig_cases.update_traces(hovertemplate="Variant=%{x}<br>Cases=%{y}<extra></extra>")
-                st.plotly_chart(
-                    clayout(fig_cases, title="Cases by Variant", xtitle="Variant", ytitle="Cases", h=500),
-                    use_container_width=True,
-                )
+            fig_cases.update_traces(hovertemplate="Variant=%{x}<br>Cases=%{y}<extra></extra>")
+            st.plotly_chart(
+                clayout(fig_cases, title="Cases by Variant", xtitle="Variant", ytitle="Cases", h=500),
+                use_container_width=True,
+            )
 
     st.divider()
     st.markdown("#### B) Top Transitions (Overall)")
@@ -933,43 +921,45 @@ def render_process_explorer(db_url: str) -> None:
         transition_sorted = transition_sorted.dropna(subset=["transition_count"])
         transition_sorted = transition_sorted.sort_values("transition_count", ascending=False)
 
-        col_table, col_sankey = st.columns([1.15, 1.15])
+        top20 = transition_sorted[
+            ["from_event", "to_event", "transition_count", "avg_delta_hours", "median_delta_hours", "p90_delta_hours"]
+        ].head(20).copy()
+        top20["transition_count"] = top20["transition_count"].astype("Int64")
+        st.dataframe(
+            style_table(
+                top20,
+                hour_cols={"avg_delta_hours", "median_delta_hours", "p90_delta_hours"},
+                good_high_cols={"transition_count"},
+                good_low_cols={"avg_delta_hours", "median_delta_hours", "p90_delta_hours"},
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
 
-        with col_table:
-            top20 = transition_sorted[
-                ["from_event", "to_event", "transition_count", "avg_delta_hours", "median_delta_hours", "p90_delta_hours"]
-            ].head(20).copy()
-            top20["transition_count"] = top20["transition_count"].astype("Int64")
-            st.dataframe(
-                style_table(
-                    top20,
-                    hour_cols={"avg_delta_hours", "median_delta_hours", "p90_delta_hours"},
-                    good_high_cols={"transition_count"},
-                    good_low_cols={"avg_delta_hours", "median_delta_hours", "p90_delta_hours"},
-                ),
-                use_container_width=True,
-                hide_index=True,
-            )
-
-        with col_sankey:
-            fig_overall = build_sankey(
-                transitions=transition_sorted,
-                title="Overall Flow Sankey (Top 25 Transitions)",
-                max_rows=25,
-                height=540,
-            )
-            if fig_overall is None:
-                st.info("Not enough transition data to draw overall Sankey.")
-            else:
-                st.plotly_chart(fig_overall, use_container_width=True)
+        fig_overall = build_sankey(
+            transitions=transition_sorted,
+            title="Overall Flow Sankey (Top 25 Transitions)",
+            max_rows=25,
+            height=540,
+        )
+        if fig_overall is None:
+            st.info("Not enough transition data to draw overall Sankey.")
+        else:
+            st.plotly_chart(fig_overall, use_container_width=True)
 
     st.divider()
     st.markdown("#### C) Variant Drilldown")
-    if selected_variant is None:
-        st.info("Select a variant in the leaderboard to view transition drilldown.")
+    if not variant_options:
+        st.info("No variant values available for drilldown.")
     elif variant_transition_df.empty:
         st.info("No rows in im.v_transition_by_variant.")
     else:
+        selected_variant = st.selectbox(
+            "Variant drilldown",
+            options=variant_options,
+            index=0,
+            key="process_variant_select",
+        )
         vdf = variant_transition_df.copy()
         vdf["variant"] = vdf["variant"].astype("string")
         vdf["transition_count"] = pd.to_numeric(vdf["transition_count"], errors="coerce")
@@ -981,32 +971,29 @@ def render_process_explorer(db_url: str) -> None:
         if selected_df.empty:
             st.info(f"No transition rows for variant '{selected_variant}'.")
         else:
-            col_table_v, col_sankey_v = st.columns([1.1, 1.1])
-            with col_table_v:
-                top20_variant = selected_df[["from_event", "to_event", "transition_count", "avg_delta_hours"]].head(20).copy()
-                top20_variant["transition_count"] = top20_variant["transition_count"].astype("Int64")
-                st.dataframe(
-                    style_table(
-                        top20_variant,
-                        hour_cols={"avg_delta_hours"},
-                        good_high_cols={"transition_count"},
-                        good_low_cols={"avg_delta_hours"},
-                    ),
-                    use_container_width=True,
-                    hide_index=True,
-                )
+            top20_variant = selected_df[["from_event", "to_event", "transition_count", "avg_delta_hours"]].head(20).copy()
+            top20_variant["transition_count"] = top20_variant["transition_count"].astype("Int64")
+            st.dataframe(
+                style_table(
+                    top20_variant,
+                    hour_cols={"avg_delta_hours"},
+                    good_high_cols={"transition_count"},
+                    good_low_cols={"avg_delta_hours"},
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
 
-            with col_sankey_v:
-                fig_variant = build_sankey(
-                    transitions=selected_df,
-                    title=f"Variant Flow Sankey: {selected_variant} (Top 20)",
-                    max_rows=20,
-                    height=500,
-                )
-                if fig_variant is None:
-                    st.info("Not enough transition data to draw variant Sankey.")
-                else:
-                    st.plotly_chart(fig_variant, use_container_width=True)
+            fig_variant = build_sankey(
+                transitions=selected_df,
+                title=f"Variant Flow Sankey: {selected_variant} (Top 20)",
+                max_rows=20,
+                height=500,
+            )
+            if fig_variant is None:
+                st.info("Not enough transition data to draw variant Sankey.")
+            else:
+                st.plotly_chart(fig_variant, use_container_width=True)
 
     st.divider()
     st.markdown("#### D) Dwell Times")
@@ -1020,45 +1007,42 @@ def render_process_explorer(db_url: str) -> None:
             dwell_sorted[col] = pd.to_numeric(dwell_sorted[col], errors="coerce")
         dwell_sorted = dwell_sorted.sort_values("avg_dwell_hours", ascending=False)
 
-        col_dwell_table, col_dwell_chart = st.columns([1.1, 1.1])
-        with col_dwell_table:
-            dwell_display = dwell_sorted[
-                ["event", "occurrences", "avg_dwell_hours", "median_dwell_hours", "p90_dwell_hours"]
-            ].head(20).copy()
-            dwell_display["occurrences"] = dwell_display["occurrences"].astype("Int64")
-            st.dataframe(
-                style_table(
-                    dwell_display,
-                    hour_cols={"avg_dwell_hours", "median_dwell_hours", "p90_dwell_hours"},
-                    good_high_cols={"occurrences"},
-                    good_low_cols={"avg_dwell_hours", "median_dwell_hours", "p90_dwell_hours"},
-                ),
-                use_container_width=True,
-                hide_index=True,
-            )
+        dwell_display = dwell_sorted[
+            ["event", "occurrences", "avg_dwell_hours", "median_dwell_hours", "p90_dwell_hours"]
+        ].head(20).copy()
+        dwell_display["occurrences"] = dwell_display["occurrences"].astype("Int64")
+        st.dataframe(
+            style_table(
+                dwell_display,
+                hour_cols={"avg_dwell_hours", "median_dwell_hours", "p90_dwell_hours"},
+                good_high_cols={"occurrences"},
+                good_low_cols={"avg_dwell_hours", "median_dwell_hours", "p90_dwell_hours"},
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
 
-        with col_dwell_chart:
-            top10_dwell = dwell_sorted.head(10).sort_values("avg_dwell_hours", ascending=True)
-            fig_dwell = px.bar(
-                top10_dwell,
-                x="avg_dwell_hours",
-                y="event",
-                orientation="h",
-                text_auto=".2f",
-            )
-            fig_dwell.update_traces(
-                hovertemplate="Event=%{y}<br>Avg Dwell=%{x:.2f} hrs<extra></extra>",
-            )
-            st.plotly_chart(
-                clayout(
-                    fig_dwell,
-                    title="Top 10 Events by Avg Dwell Hours",
-                    xtitle="Avg Dwell (hrs)",
-                    ytitle="Event",
-                    h=500,
-                ),
-                use_container_width=True,
-            )
+        top10_dwell = dwell_sorted.head(10).sort_values("avg_dwell_hours", ascending=True)
+        fig_dwell = px.bar(
+            top10_dwell,
+            x="avg_dwell_hours",
+            y="event",
+            orientation="h",
+            text_auto=".2f",
+        )
+        fig_dwell.update_traces(
+            hovertemplate="Event=%{y}<br>Avg Dwell=%{x:.2f} hrs<extra></extra>",
+        )
+        st.plotly_chart(
+            clayout(
+                fig_dwell,
+                title="Top 10 Events by Avg Dwell Hours",
+                xtitle="Avg Dwell (hrs)",
+                ytitle="Event",
+                h=500,
+            ),
+            use_container_width=True,
+        )
 
     insight_callouts: list[str] = []
     if not transition_sorted.empty:
@@ -1132,115 +1116,109 @@ def render_bottlenecks(db_url: str) -> None:
 
     st.divider()
     st.markdown("#### Row 1: Top Dwell Steps")
-    row1_table, row1_chart = st.columns([1.1, 1.1])
-    with row1_table:
-        if dwell_num.empty:
-            st.info("No rows in im.v_dwell_by_event.")
-        else:
-            top_dwell = dwell_num[
-                ["event", "occurrences", "avg_dwell_hours", "median_dwell_hours", "p90_dwell_hours"]
-            ].head(15).copy()
-            top_dwell["occurrences"] = top_dwell["occurrences"].astype("Int64")
-            st.dataframe(
-                style_table(
-                    top_dwell,
-                    hour_cols={"avg_dwell_hours", "median_dwell_hours", "p90_dwell_hours"},
-                    good_high_cols={"occurrences"},
-                    good_low_cols={"avg_dwell_hours", "median_dwell_hours", "p90_dwell_hours"},
-                ),
-                use_container_width=True,
-                hide_index=True,
-            )
+    if dwell_num.empty:
+        st.info("No rows in im.v_dwell_by_event.")
+    else:
+        top_dwell = dwell_num[
+            ["event", "occurrences", "avg_dwell_hours", "median_dwell_hours", "p90_dwell_hours"]
+        ].head(15).copy()
+        top_dwell["occurrences"] = top_dwell["occurrences"].astype("Int64")
+        st.dataframe(
+            style_table(
+                top_dwell,
+                hour_cols={"avg_dwell_hours", "median_dwell_hours", "p90_dwell_hours"},
+                good_high_cols={"occurrences"},
+                good_low_cols={"avg_dwell_hours", "median_dwell_hours", "p90_dwell_hours"},
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
 
-    with row1_chart:
-        if dwell_num.empty:
-            st.info("Not enough dwell data for charting.")
+    if dwell_num.empty:
+        st.info("Not enough dwell data for charting.")
+    else:
+        top10_dwell = dwell_num.head(10).copy().sort_values("avg_dwell_hours", ascending=True)
+        fig_dwell = px.bar(
+            top10_dwell,
+            x="avg_dwell_hours",
+            y="event",
+            orientation="h",
+            text_auto=".2f",
+        )
+        fig_dwell.update_traces(hovertemplate="Event=%{y}<br>Avg Dwell=%{x:.2f} hrs<extra></extra>")
+        st.plotly_chart(
+            clayout(
+                fig_dwell,
+                title="Top 10 Dwell Steps by Avg Hours",
+                xtitle="Avg Dwell (hrs)",
+                ytitle="Event",
+                h=500,
+            ),
+            use_container_width=True,
+        )
+
+    st.divider()
+    st.markdown("#### Row 2: Slowest Transitions by P90")
+    if transition_num.empty:
+        st.info("No rows in im.v_transition_summary.")
+    else:
+        slowest15 = transition_num.dropna(subset=["p90_delta_hours"]).sort_values(
+            "p90_delta_hours", ascending=False
+        ).head(15)
+        slowest15 = slowest15[
+            [
+                "from_event",
+                "to_event",
+                "transition_count",
+                "avg_delta_hours",
+                "median_delta_hours",
+                "p90_delta_hours",
+            ]
+        ].copy()
+        slowest15["transition_count"] = slowest15["transition_count"].astype("Int64")
+        st.dataframe(
+            style_table(
+                slowest15,
+                hour_cols={"avg_delta_hours", "median_delta_hours", "p90_delta_hours"},
+                good_high_cols={"transition_count"},
+                good_low_cols={"avg_delta_hours", "median_delta_hours", "p90_delta_hours"},
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    if transition_num.empty:
+        st.info("Not enough transition data for slowest-transition chart.")
+    else:
+        top10_slowest = transition_num.dropna(subset=["p90_delta_hours"]).sort_values(
+            "p90_delta_hours", ascending=False
+        ).head(10)
+        if top10_slowest.empty:
+            st.info("Not enough transition data for slowest-transition chart.")
         else:
-            top10_dwell = dwell_num.head(10).copy().sort_values("avg_dwell_hours", ascending=True)
-            fig_dwell = px.bar(
-                top10_dwell,
-                x="avg_dwell_hours",
-                y="event",
+            top10_slowest = top10_slowest.copy()
+            top10_slowest["transition_label"] = (
+                top10_slowest["from_event"].astype(str) + " -> " + top10_slowest["to_event"].astype(str)
+            )
+            top10_slowest = top10_slowest.sort_values("p90_delta_hours", ascending=True)
+            fig_slow = px.bar(
+                top10_slowest,
+                x="p90_delta_hours",
+                y="transition_label",
                 orientation="h",
                 text_auto=".2f",
             )
-            fig_dwell.update_traces(hovertemplate="Event=%{y}<br>Avg Dwell=%{x:.2f} hrs<extra></extra>")
+            fig_slow.update_traces(hovertemplate="Transition=%{y}<br>P90 Delay=%{x:.2f} hrs<extra></extra>")
             st.plotly_chart(
                 clayout(
-                    fig_dwell,
-                    title="Top 10 Dwell Steps by Avg Hours",
-                    xtitle="Avg Dwell (hrs)",
-                    ytitle="Event",
+                    fig_slow,
+                    title="Top 10 Slowest Transitions (P90)",
+                    xtitle="P90 Delay (hrs)",
+                    ytitle="Transition",
                     h=500,
                 ),
                 use_container_width=True,
             )
-
-    st.divider()
-    st.markdown("#### Row 2: Slowest Transitions by P90")
-    row2_table, row2_chart = st.columns([1.2, 1.0])
-    with row2_table:
-        if transition_num.empty:
-            st.info("No rows in im.v_transition_summary.")
-        else:
-            slowest15 = transition_num.dropna(subset=["p90_delta_hours"]).sort_values(
-                "p90_delta_hours", ascending=False
-            ).head(15)
-            slowest15 = slowest15[
-                [
-                    "from_event",
-                    "to_event",
-                    "transition_count",
-                    "avg_delta_hours",
-                    "median_delta_hours",
-                    "p90_delta_hours",
-                ]
-            ].copy()
-            slowest15["transition_count"] = slowest15["transition_count"].astype("Int64")
-            st.dataframe(
-                style_table(
-                    slowest15,
-                    hour_cols={"avg_delta_hours", "median_delta_hours", "p90_delta_hours"},
-                    good_high_cols={"transition_count"},
-                    good_low_cols={"avg_delta_hours", "median_delta_hours", "p90_delta_hours"},
-                ),
-                use_container_width=True,
-                hide_index=True,
-            )
-
-    with row2_chart:
-        if transition_num.empty:
-            st.info("Not enough transition data for slowest-transition chart.")
-        else:
-            top10_slowest = transition_num.dropna(subset=["p90_delta_hours"]).sort_values(
-                "p90_delta_hours", ascending=False
-            ).head(10)
-            if top10_slowest.empty:
-                st.info("Not enough transition data for slowest-transition chart.")
-            else:
-                top10_slowest = top10_slowest.copy()
-                top10_slowest["transition_label"] = (
-                    top10_slowest["from_event"].astype(str) + " -> " + top10_slowest["to_event"].astype(str)
-                )
-                top10_slowest = top10_slowest.sort_values("p90_delta_hours", ascending=True)
-                fig_slow = px.bar(
-                    top10_slowest,
-                    x="p90_delta_hours",
-                    y="transition_label",
-                    orientation="h",
-                    text_auto=".2f",
-                )
-                fig_slow.update_traces(hovertemplate="Transition=%{y}<br>P90 Delay=%{x:.2f} hrs<extra></extra>")
-                st.plotly_chart(
-                    clayout(
-                        fig_slow,
-                        title="Top 10 Slowest Transitions (P90)",
-                        xtitle="P90 Delay (hrs)",
-                        ytitle="Transition",
-                        h=500,
-                    ),
-                    use_container_width=True,
-                )
 
     st.divider()
     st.markdown("#### Row 3: Most Common Transitions")
@@ -1487,70 +1465,67 @@ def render_escalations_handoffs(db_url: str) -> None:
             ranked = handoff_num.sort_values([sort_metric, "cases"], ascending=[False, False])
             top25 = ranked.head(25).copy()
 
-            col_table, col_chart = st.columns([1.25, 1.0])
-            with col_table:
-                base_cols = [
-                    "variant",
-                    "issue_type",
-                    "cases",
-                    "avg_cycle_hours",
-                    "p90_cycle_hours",
-                    "avg_csat",
-                    "met_sla_rate",
-                    "avg_resolver_changes",
-                    "avg_escalations",
-                    "handoff_rate",
-                    "high_handoff_rate",
-                    "reopen_rate",
-                    "reject_rate",
-                    "pingpong_rate",
-                ]
-                display_cols = [col for col in base_cols if col in top25.columns]
-                top25_display = top25[display_cols].copy()
-                if "cases" in top25_display.columns:
-                    top25_display["cases"] = top25_display["cases"].astype("Int64")
+            base_cols = [
+                "variant",
+                "issue_type",
+                "cases",
+                "avg_cycle_hours",
+                "p90_cycle_hours",
+                "avg_csat",
+                "met_sla_rate",
+                "avg_resolver_changes",
+                "avg_escalations",
+                "handoff_rate",
+                "high_handoff_rate",
+                "reopen_rate",
+                "reject_rate",
+                "pingpong_rate",
+            ]
+            display_cols = [col for col in base_cols if col in top25.columns]
+            top25_display = top25[display_cols].copy()
+            if "cases" in top25_display.columns:
+                top25_display["cases"] = top25_display["cases"].astype("Int64")
 
-                st.dataframe(
-                    style_table(
-                        top25_display,
-                        pct_cols={
-                            "met_sla_rate",
-                            "handoff_rate",
-                            "high_handoff_rate",
-                            "pingpong_rate",
-                            "reopen_rate",
-                            "reject_rate",
-                        },
-                        hour_cols={"avg_cycle_hours", "p90_cycle_hours"},
-                        good_high_cols={"met_sla_rate", "avg_csat", "cases"},
-                        bad_high_cols={"high_handoff_rate", "pingpong_rate", "reject_rate", "reopen_rate"},
-                    ),
-                    use_container_width=True,
-                    hide_index=True,
-                )
+            st.dataframe(
+                style_table(
+                    top25_display,
+                    pct_cols={
+                        "met_sla_rate",
+                        "handoff_rate",
+                        "high_handoff_rate",
+                        "pingpong_rate",
+                        "reopen_rate",
+                        "reject_rate",
+                    },
+                    hour_cols={"avg_cycle_hours", "p90_cycle_hours"},
+                    good_high_cols={"met_sla_rate", "avg_csat", "cases"},
+                    bad_high_cols={"high_handoff_rate", "pingpong_rate", "reject_rate", "reopen_rate"},
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
 
-            with col_chart:
-                top10_hot = ranked.head(10).copy()
-                top10_hot["label"] = top10_hot["variant"].astype(str) + " | " + top10_hot["issue_type"].astype(str)
-                top10_hot = top10_hot.sort_values(sort_metric, ascending=True)
-                fig_hot = px.bar(
-                    top10_hot,
-                    x=sort_metric,
-                    y="label",
-                    orientation="h",
-                    text_auto=".1%",
-                )
-                fig_hot.update_traces(hovertemplate="Group=%{y}<br>Rate=%{x:.1%}<extra></extra>")
-                st.plotly_chart(
-                    clayout(
-                        fig_hot,
-                        title="Top 10 Hotspot Groups",
-                        xtitle="Rate",
-                        ytitle="Variant | Issue Type",
-                        h=560,
-                    ),
-                    use_container_width=True,
-                )
+            top10_hot = ranked.head(10).copy()
+            top10_hot["label"] = top10_hot["variant"].astype(str) + " | " + top10_hot["issue_type"].astype(str)
+            top10_hot = top10_hot.sort_values(sort_metric, ascending=True)
+            fig_hot = px.bar(
+                top10_hot,
+                x=sort_metric,
+                y="label",
+                orientation="h",
+                text_auto=".1%",
+            )
+            fig_hot.update_traces(hovertemplate="Group=%{y}<br>Rate=%{x:.1%}<extra></extra>")
+            st.plotly_chart(
+                clayout(
+                    fig_hot,
+                    title="Top 10 Hotspot Groups",
+                    xtitle="Rate",
+                    ytitle="Variant | Issue Type",
+                    h=560,
+                ),
+                use_container_width=True,
+            )
 
     with tab_pingpong:
         st.markdown("#### Ping-Pong Explorer")
@@ -1595,82 +1570,79 @@ def render_escalations_handoffs(db_url: str) -> None:
                 ascending=[False, False, False],
             )
 
-            cases_col, scatter_col = st.columns([1.25, 1.0])
-            with cases_col:
-                if filtered.empty:
-                    st.info("No rows match current filter selection.")
-                else:
-                    display_cols = [
-                        "case_id",
-                        "priority",
-                        "issue_type",
-                        "variant",
-                        "cycle_hours",
-                        "customer_satisfaction",
-                        "met_sla",
-                        "resolver_changes",
-                        "escalation_count",
-                        "pingpong_transitions",
-                        "has_reopen",
-                        "has_reject",
-                    ]
-                    top100 = filtered[display_cols].head(100).copy()
-                    st.dataframe(
-                        style_table(
-                            top100,
-                            hour_cols={"cycle_hours"},
-                            good_high_cols={"met_sla"},
-                            bad_high_cols={"cycle_hours"},
-                            bad_low_cols={"customer_satisfaction", "met_sla"},
-                        ),
-                        use_container_width=True,
-                        hide_index=True,
-                    )
-
-                st.download_button(
-                    "Download filtered ping-pong CSV",
-                    data=filtered.to_csv(index=False).encode("utf-8"),
-                    file_name="pingpong_cases_filtered.csv",
-                    mime="text/csv",
-                    key="dl_eh_pingpong_filtered",
+            if filtered.empty:
+                st.info("No rows match current filter selection.")
+            else:
+                display_cols = [
+                    "case_id",
+                    "priority",
+                    "issue_type",
+                    "variant",
+                    "cycle_hours",
+                    "customer_satisfaction",
+                    "met_sla",
+                    "resolver_changes",
+                    "escalation_count",
+                    "pingpong_transitions",
+                    "has_reopen",
+                    "has_reject",
+                ]
+                top100 = filtered[display_cols].head(100).copy()
+                st.dataframe(
+                    style_table(
+                        top100,
+                        hour_cols={"cycle_hours"},
+                        good_high_cols={"met_sla"},
+                        bad_high_cols={"cycle_hours"},
+                        bad_low_cols={"customer_satisfaction", "met_sla"},
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
                 )
 
-            with scatter_col:
-                if filtered.empty:
-                    st.info("No rows match current filter selection.")
+            st.download_button(
+                "Download filtered ping-pong CSV",
+                data=filtered.to_csv(index=False).encode("utf-8"),
+                file_name="pingpong_cases_filtered.csv",
+                mime="text/csv",
+                key="dl_eh_pingpong_filtered",
+            )
+
+            if filtered.empty:
+                st.info("No rows match current filter selection.")
+            else:
+                plot_df = filtered.dropna(
+                    subset=["resolver_changes", "cycle_hours", "pingpong_transitions"]
+                ).copy()
+                if plot_df.empty:
+                    st.info("Not enough numeric data for ping-pong scatter chart.")
                 else:
-                    plot_df = filtered.dropna(
-                        subset=["resolver_changes", "cycle_hours", "pingpong_transitions"]
-                    ).copy()
-                    if plot_df.empty:
-                        st.info("Not enough numeric data for ping-pong scatter chart.")
-                    else:
-                        fig_scatter = px.scatter(
-                            plot_df,
-                            x="resolver_changes",
-                            y="cycle_hours",
-                            size="pingpong_transitions",
-                            color="priority",
-                            hover_name="case_id",
-                            size_max=56,
-                        )
-                        fig_scatter.update_traces(
-                            marker=dict(line=dict(width=1, color="rgba(250,250,250,0.35)"), opacity=0.82),
-                            hovertemplate=(
-                                "Case=%{hovertext}<br>Resolver Changes=%{x:.0f}<br>Cycle=%{y:.2f} hrs"
-                                "<br>Ping-Pong Transitions=%{marker.size:.0f}<extra></extra>"
-                            ),
-                        )
-                        st.plotly_chart(
-                            clayout(
-                                fig_scatter,
-                                title="Resolver Changes vs Cycle Time (Ping-Pong Cases)",
-                                xtitle="Resolver Changes",
-                                ytitle="Cycle Hours",
-                                h=520,
-                            ),
-                            use_container_width=True,
-                        )
+                    fig_scatter = px.scatter(
+                        plot_df,
+                        x="resolver_changes",
+                        y="cycle_hours",
+                        size="pingpong_transitions",
+                        color="priority",
+                        hover_name="case_id",
+                        size_max=56,
+                    )
+                    fig_scatter.update_traces(
+                        marker=dict(line=dict(width=1, color="rgba(250,250,250,0.35)"), opacity=0.82),
+                        hovertemplate=(
+                            "Case=%{hovertext}<br>Resolver Changes=%{x:.0f}<br>Cycle=%{y:.2f} hrs"
+                            "<br>Ping-Pong Transitions=%{marker.size:.0f}<extra></extra>"
+                        ),
+                    )
+                    st.plotly_chart(
+                        clayout(
+                            fig_scatter,
+                            title="Resolver Changes vs Cycle Time (Ping-Pong Cases)",
+                            xtitle="Resolver Changes",
+                            ytitle="Cycle Hours",
+                            h=520,
+                        ),
+                        use_container_width=True,
+                    )
 
     with tab_worklist:
         st.markdown("#### Ops Worklist: Worst Handoff Cases")
@@ -1923,74 +1895,71 @@ def render_quality_cx(db_url: str) -> None:
 
             filtered = filtered.sort_values("cycle_hours", ascending=False)
 
-            cohort_table_col, cohort_scatter_col = st.columns([1.2, 1.0])
-            with cohort_table_col:
-                display_cols = [
-                    "case_id",
-                    "priority",
-                    "issue_type",
-                    "variant",
-                    "report_channel",
-                    "cycle_hours",
-                    "customer_satisfaction",
-                    "met_sla",
-                    "closed_without_feedback",
-                    "reopened_within_3h",
-                    "reopened_within_24h",
-                    "has_reject",
-                    "reopen_after_close_hours",
-                ]
-                top120 = filtered[display_cols].head(120).copy()
-                st.dataframe(
-                    style_table(
-                        top120,
-                        hour_cols={"cycle_hours", "reopen_after_close_hours"},
-                        good_high_cols={"met_sla"},
-                        bad_high_cols={
-                            "closed_without_feedback",
-                            "reopened_within_3h",
-                            "reopened_within_24h",
-                            "has_reject",
-                        },
-                        bad_low_cols={"customer_satisfaction", "met_sla"},
+            display_cols = [
+                "case_id",
+                "priority",
+                "issue_type",
+                "variant",
+                "report_channel",
+                "cycle_hours",
+                "customer_satisfaction",
+                "met_sla",
+                "closed_without_feedback",
+                "reopened_within_3h",
+                "reopened_within_24h",
+                "has_reject",
+                "reopen_after_close_hours",
+            ]
+            top120 = filtered[display_cols].head(120).copy()
+            st.dataframe(
+                style_table(
+                    top120,
+                    hour_cols={"cycle_hours", "reopen_after_close_hours"},
+                    good_high_cols={"met_sla"},
+                    bad_high_cols={
+                        "closed_without_feedback",
+                        "reopened_within_3h",
+                        "reopened_within_24h",
+                        "has_reject",
+                    },
+                    bad_low_cols={"customer_satisfaction", "met_sla"},
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+            st.download_button(
+                "Download filtered cohort CSV",
+                data=filtered.to_csv(index=False).encode("utf-8"),
+                file_name="quality_cx_cohort_filtered.csv",
+                mime="text/csv",
+                key="dl_qcx_cohort_filtered",
+            )
+
+            plot_df = filtered.dropna(subset=["cycle_hours", "customer_satisfaction"]).copy()
+            if plot_df.empty:
+                st.info("Not enough numeric rows for cohort scatter chart.")
+            else:
+                fig_scatter = px.scatter(
+                    plot_df,
+                    x="cycle_hours",
+                    y="customer_satisfaction",
+                    color="met_sla",
+                    hover_name="case_id",
+                )
+                fig_scatter.update_traces(
+                    marker=dict(size=10, line=dict(width=1, color="rgba(250,250,250,0.30)"), opacity=0.80),
+                    hovertemplate="Case=%{hovertext}<br>Cycle=%{x:.2f} hrs<br>CSAT=%{y:.2f}<extra></extra>",
+                )
+                st.plotly_chart(
+                    clayout(
+                        fig_scatter,
+                        title="Cycle Time vs CSAT (Filtered Cohort)",
+                        xtitle="Cycle Hours",
+                        ytitle="Customer Satisfaction",
+                        h=520,
                     ),
                     use_container_width=True,
-                    hide_index=True,
                 )
-                st.download_button(
-                    "Download filtered cohort CSV",
-                    data=filtered.to_csv(index=False).encode("utf-8"),
-                    file_name="quality_cx_cohort_filtered.csv",
-                    mime="text/csv",
-                    key="dl_qcx_cohort_filtered",
-                )
-
-            with cohort_scatter_col:
-                plot_df = filtered.dropna(subset=["cycle_hours", "customer_satisfaction"]).copy()
-                if plot_df.empty:
-                    st.info("Not enough numeric rows for cohort scatter chart.")
-                else:
-                    fig_scatter = px.scatter(
-                        plot_df,
-                        x="cycle_hours",
-                        y="customer_satisfaction",
-                        color="met_sla",
-                        hover_name="case_id",
-                    )
-                    fig_scatter.update_traces(
-                        marker=dict(size=10, line=dict(width=1, color="rgba(250,250,250,0.30)"), opacity=0.80),
-                        hovertemplate="Case=%{hovertext}<br>Cycle=%{x:.2f} hrs<br>CSAT=%{y:.2f}<extra></extra>",
-                    )
-                    st.plotly_chart(
-                        clayout(
-                            fig_scatter,
-                            title="Cycle Time vs CSAT (Filtered Cohort)",
-                            xtitle="Cycle Hours",
-                            ytitle="Customer Satisfaction",
-                            h=520,
-                        ),
-                        use_container_width=True,
-                    )
 
     with tab_breakdown:
         st.markdown("#### CX Breakdown by Issue Type and Priority")
@@ -2157,6 +2126,22 @@ def render_quality_cx(db_url: str) -> None:
 
 def render_problem_candidates(db_url: str) -> None:
     header("Problem Candidates", "Rank recurring clusters for prevention backlog planning and evidence-based drilldown.")
+    ui_explainer(
+        "How to read this page",
+        what=[
+            "This is a ranked prevention backlog inferred from incident outcomes and repeat patterns.",
+            "Each row combines operational pain signals into a candidate priority.",
+        ],
+        why=[
+            "Use it to prioritize problem records and prevention work with measurable impact.",
+            "Focuses effort on candidates with high cycle-time, quality, and SLA risk.",
+        ],
+        how=[
+            "Start with Backlog to identify top opportunities.",
+            "Use Drilldown to validate evidence at case level.",
+            "Export candidate and case evidence for problem management workflows.",
+        ],
+    )
 
     try:
         backlog_df = run_query(PROBLEM_CANDIDATES_SQL)
@@ -2188,13 +2173,24 @@ def render_problem_candidates(db_url: str) -> None:
             ]:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
 
-            filter_cols = st.columns([1.4, 1.0])
+            filter_cols = st.columns([1.5, 1.0])
             with filter_cols[0]:
                 issue_options = sorted([str(v) for v in df["issue_type"].dropna().unique().tolist()])
-                selected_issue_types = st.multiselect("Issue Type", options=issue_options, default=issue_options)
+                selected_issue_types = st.multiselect(
+                    "Issue Type",
+                    options=issue_options,
+                    default=issue_options,
+                    key="pc_backlog_issue_filter",
+                )
             with filter_cols[1]:
                 max_cases = int(df["cases"].dropna().max()) if not df["cases"].dropna().empty else 10
-                min_cases = st.slider("Minimum Cases", min_value=1, max_value=max(max_cases, 1), value=min(10, max_cases))
+                min_cases = st.slider(
+                    "Minimum Cases",
+                    min_value=1,
+                    max_value=max(max_cases, 1),
+                    value=min(10, max_cases),
+                    key="pc_backlog_min_cases",
+                )
 
             filtered = df.copy()
             if selected_issue_types:
@@ -2204,8 +2200,9 @@ def render_problem_candidates(db_url: str) -> None:
             filtered = filtered[filtered["cases"] >= min_cases]
             filtered = filtered.sort_values(["impact_score", "cases"], ascending=[False, False])
 
-            view_cols = [
+            table_cols = [
                 "issue_type",
+                "short_description_norm",
                 "cases",
                 "impact_score",
                 "avg_cycle_hours",
@@ -2215,96 +2212,122 @@ def render_problem_candidates(db_url: str) -> None:
                 "reopen_rate",
                 "reject_rate",
                 "last_seen_ts",
-                "example_description",
             ]
-            display = filtered[view_cols].copy()
-            display["cases"] = display["cases"].map(fmt_int)
-            for col in ["impact_score", "avg_cycle_hours", "p90_cycle_hours", "avg_csat"]:
-                display[col] = display[col].map(lambda v: fmt_float(v, 2))
-            for col in ["met_sla_rate", "reopen_rate", "reject_rate"]:
-                display[col] = display[col].map(lambda v: fmt_pct(v, 1))
-            st.dataframe(display, use_container_width=True, hide_index=True)
+            top40 = filtered[table_cols].head(40).copy()
+            if not top40.empty:
+                top40["cases"] = top40["cases"].astype("Int64")
+            st.dataframe(
+                style_table(
+                    top40,
+                    pct_cols={"met_sla_rate", "reopen_rate", "reject_rate"},
+                    hour_cols={"avg_cycle_hours", "p90_cycle_hours"},
+                    good_high_cols={"met_sla_rate", "avg_csat", "cases"},
+                    bad_high_cols={"impact_score", "avg_cycle_hours", "p90_cycle_hours", "reopen_rate", "reject_rate"},
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
 
-            st.divider()
-            chart_cols = st.columns(2)
-            with chart_cols[0]:
-                chart_df = filtered.head(15).copy()
-                chart_df["candidate_label"] = chart_df.apply(
-                    lambda r: f"{r['issue_type']} | {str(r['short_description_norm'])[:34]}"
-                    + ("..." if len(str(r["short_description_norm"])) > 34 else ""),
-                    axis=1,
-                )
-                fig_impact = px.bar(
-                    chart_df.sort_values("impact_score", ascending=True),
-                    x="impact_score",
-                    y="candidate_label",
-                    orientation="h",
-                    text_auto=".2f",
-                )
-                fig_impact.update_traces(
-                    hovertemplate="Candidate=%{y}<br>Impact=%{x:.2f}<extra></extra>",
-                )
-                st.plotly_chart(
-                    clayout(
-                        fig_impact,
-                        title="Impact Score by Candidate (Top 15)",
-                        xtitle="Impact Score",
-                        ytitle="Issue | Description",
-                        h=520,
-                    ),
-                    use_container_width=True,
-                )
+            chart_df = filtered.head(15).copy()
+            impact_col, scatter_col = st.columns(2)
+            with impact_col:
+                if chart_df.empty:
+                    st.info("No candidates match current filters.")
+                else:
+                    chart_df["candidate_label"] = chart_df.apply(
+                        lambda r: f"{r['issue_type']} | {str(r['short_description_norm'])[:34]}"
+                        + ("..." if len(str(r["short_description_norm"])) > 34 else ""),
+                        axis=1,
+                    )
+                    fig_impact = px.bar(
+                        chart_df.sort_values("impact_score", ascending=True),
+                        x="impact_score",
+                        y="candidate_label",
+                        orientation="h",
+                        text_auto=".2f",
+                    )
+                    fig_impact.update_traces(hovertemplate="Candidate=%{y}<br>Impact=%{x:.2f}<extra></extra>")
+                    st.plotly_chart(
+                        clayout(
+                            fig_impact,
+                            title="Impact Score by Candidate (Top 15)",
+                            xtitle="Impact Score",
+                            ytitle="Issue | Description",
+                            h=340,
+                        ),
+                        use_container_width=True,
+                    )
 
-            with chart_cols[1]:
-                scatter_df = filtered.copy()
-                fig_scatter = px.scatter(
-                    scatter_df,
-                    x="cases",
-                    y="avg_cycle_hours",
-                    size="impact_score",
-                    color="issue_type",
-                    hover_name="example_description",
-                    size_max=56,
-                )
-                fig_scatter.update_traces(
-                    marker=dict(line=dict(width=1, color="rgba(250,250,250,0.35)"), opacity=0.82),
-                    hovertemplate=(
-                        "Desc=%{hovertext}<br>Cases=%{x:.0f}<br>Avg Cycle=%{y:.2f} hrs"
-                        "<extra></extra>"
-                    ),
-                )
-                st.plotly_chart(
-                    clayout(
-                        fig_scatter,
-                        title="Cases vs Avg Cycle (Bubble Size = Impact)",
-                        xtitle="Cases",
-                        ytitle="Avg Cycle Hours",
-                        h=520,
-                    ),
-                    use_container_width=True,
-                )
+            with scatter_col:
+                if filtered.empty:
+                    st.info("No candidates match current filters.")
+                else:
+                    bubble_df = filtered.head(60).copy()
+                    fig_scatter = px.scatter(
+                        bubble_df,
+                        x="cases",
+                        y="avg_cycle_hours",
+                        size="impact_score",
+                        color="issue_type",
+                        hover_name="short_description_norm",
+                        size_max=52,
+                    )
+                    fig_scatter.update_traces(
+                        marker=dict(line=dict(width=1, color="rgba(250,250,250,0.35)"), opacity=0.82),
+                        hovertemplate=(
+                            "Candidate=%{hovertext}<br>Cases=%{x:.0f}<br>Avg Cycle=%{y:.2f} hrs<extra></extra>"
+                        ),
+                    )
+                    st.plotly_chart(
+                        clayout(
+                            fig_scatter,
+                            title="Cases vs Avg Cycle (Bubble Size = Impact)",
+                            xtitle="Cases",
+                            ytitle="Avg Cycle Hours",
+                            h=340,
+                        ),
+                        use_container_width=True,
+                    )
 
             if filtered.empty:
                 st.info("No candidates match current filters.")
             else:
+                top_candidate = filtered.iloc[0]
+                st.info(
+                    "Top impact candidate: "
+                    f"{top_candidate['issue_type']} | {top_candidate['short_description_norm']} "
+                    f"(cases={fmt_int(top_candidate['cases'])}, impact={fmt_float(top_candidate['impact_score'])}, "
+                    f"avg_cycle={fmt_float(top_candidate['avg_cycle_hours'])}h, sla_met={fmt_pct(top_candidate['met_sla_rate'])})."
+                )
+
+                worst_sla_pool = filtered[filtered["cases"] >= min_cases].dropna(subset=["met_sla_rate"])
+                if not worst_sla_pool.empty:
+                    worst_sla = worst_sla_pool.sort_values(["met_sla_rate", "cases"], ascending=[True, False]).iloc[0]
+                    st.info(
+                        "Worst SLA candidate: "
+                        f"{worst_sla['issue_type']} | {worst_sla['short_description_norm']} "
+                        f"(sla_met={fmt_pct(worst_sla['met_sla_rate'])}, cases={fmt_int(worst_sla['cases'])}, "
+                        f"reject={fmt_pct(worst_sla['reject_rate'])}, reopen={fmt_pct(worst_sla['reopen_rate'])})."
+                    )
+
                 candidate_options = filtered.apply(
                     lambda r: f"{r['issue_type']} || {r['short_description_norm']}",
                     axis=1,
                 ).tolist()
-                selected_key = st.selectbox("Candidate", options=candidate_options, index=0, key="problem_candidate_key")
+                selected_key = st.selectbox(
+                    "Candidate",
+                    options=candidate_options,
+                    index=0,
+                    key="pc_candidate_key",
+                )
                 selected_issue_type, selected_norm = selected_key.split(" || ", 1)
-                selected_row = filtered[
-                    (filtered["issue_type"] == selected_issue_type)
-                    & (filtered["short_description_norm"] == selected_norm)
-                ].iloc[0]
-                st.info(
-                    "Candidate Summary: "
-                    f"cases={fmt_int(selected_row['cases'])}, "
-                    f"impact={fmt_float(selected_row['impact_score'])}, "
-                    f"avg_cycle={fmt_float(selected_row['avg_cycle_hours'])} hrs, "
-                    f"sla_met={fmt_pct(selected_row['met_sla_rate'])}, "
-                    f"reopen={fmt_pct(selected_row['reopen_rate'])}, "
-                    f"reject={fmt_pct(selected_row['reject_rate'])}"
+
+                st.download_button(
+                    "Download filtered backlog CSV",
+                    data=filtered.to_csv(index=False).encode("utf-8"),
+                    file_name="problem_candidates_filtered.csv",
+                    mime="text/csv",
+                    key="dl_pc_backlog_filtered",
                 )
 
     with tabs[1]:
@@ -2325,62 +2348,70 @@ def render_problem_candidates(db_url: str) -> None:
                     st.stop()
 
                 st.caption(f"Selected candidate: {selected_issue_type} | {selected_norm}")
+                st.info(
+                    "How to interpret: use this table to validate recurrence and impact drivers; use the distribution to assess tail-risk cycle times."
+                )
                 if drill_df.empty:
                     st.info("No cases found for selected candidate.")
                 else:
                     for col in ["cycle_hours", "customer_satisfaction"]:
                         drill_df[col] = pd.to_numeric(drill_df[col], errors="coerce")
 
+                    drill_left, drill_right = st.columns([1.25, 0.95])
+                    with drill_left:
+                        display_cols = [
+                            "case_id",
+                            "priority",
+                            "variant",
+                            "report_channel",
+                            "cycle_hours",
+                            "customer_satisfaction",
+                            "met_sla",
+                            "has_reopen",
+                            "has_reject",
+                            "has_feedback",
+                            "short_description_raw",
+                        ]
+                        table_df = drill_df[display_cols].head(200).copy()
+                        st.dataframe(
+                            style_table(
+                                table_df,
+                                hour_cols={"cycle_hours"},
+                                good_high_cols={"met_sla", "has_feedback"},
+                                bad_high_cols={"cycle_hours", "has_reopen", "has_reject"},
+                                bad_low_cols={"customer_satisfaction", "met_sla"},
+                            ),
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+
+                    with drill_right:
+                        hist_df = drill_df.dropna(subset=["cycle_hours"]).copy()
+                        if hist_df.empty:
+                            st.info("Not enough cycle-hour values for histogram.")
+                        else:
+                            fig_hist = px.histogram(hist_df, x="cycle_hours", nbins=20)
+                            fig_hist.update_traces(
+                                hovertemplate="Cycle Hours=%{x:.2f}<br>Cases=%{y}<extra></extra>",
+                            )
+                            st.plotly_chart(
+                                clayout(
+                                    fig_hist,
+                                    title="Cycle Hours Distribution (Selected Candidate)",
+                                    xtitle="Cycle Hours",
+                                    ytitle="Cases",
+                                    h=460,
+                                ),
+                                use_container_width=True,
+                            )
+
                     st.download_button(
                         "Download candidate cases CSV",
                         data=drill_df.to_csv(index=False).encode("utf-8"),
                         file_name="problem_candidate_cases.csv",
                         mime="text/csv",
+                        key="dl_pc_drill_cases",
                     )
-
-                    drill_display = drill_df.copy()
-                    drill_display["cycle_hours"] = drill_display["cycle_hours"].map(lambda v: fmt_float(v, 2))
-                    drill_display["customer_satisfaction"] = drill_display["customer_satisfaction"].map(
-                        lambda v: fmt_float(v, 2)
-                    )
-                    st.dataframe(
-                        drill_display[
-                            [
-                                "case_id",
-                                "priority",
-                                "variant",
-                                "report_channel",
-                                "cycle_hours",
-                                "customer_satisfaction",
-                                "met_sla",
-                                "has_reopen",
-                                "has_reject",
-                                "has_feedback",
-                                "short_description_raw",
-                            ]
-                        ],
-                        use_container_width=True,
-                        hide_index=True,
-                    )
-
-                    hist_df = drill_df.dropna(subset=["cycle_hours"]).copy()
-                    if hist_df.empty:
-                        st.info("Not enough cycle-hour values for histogram.")
-                    else:
-                        fig_hist = px.histogram(hist_df, x="cycle_hours", nbins=20)
-                        fig_hist.update_traces(
-                            hovertemplate="Cycle Hours=%{x:.2f}<br>Cases=%{y}<extra></extra>",
-                        )
-                        st.plotly_chart(
-                            clayout(
-                                fig_hist,
-                                title="Cycle Hours Distribution (Selected Candidate)",
-                                xtitle="Cycle Hours",
-                                ytitle="Cases",
-                                h=460,
-                            ),
-                            use_container_width=True,
-                        )
 
     with tabs[2]:
         st.markdown("#### Top Candidate Cases")
@@ -2394,10 +2425,14 @@ def render_problem_candidates(db_url: str) -> None:
             filter_cols = st.columns(2)
             with filter_cols[0]:
                 issue_options = sorted([str(v) for v in tc["issue_type"].dropna().unique().tolist()])
-                issue_filter = st.multiselect("Issue Type", options=issue_options, default=issue_options, key="top_issue")
+                issue_filter = st.multiselect(
+                    "Issue Type", options=issue_options, default=issue_options, key="pc_top_issue"
+                )
             with filter_cols[1]:
                 priority_options = sorted([str(v) for v in tc["priority"].dropna().unique().tolist()])
-                priority_filter = st.multiselect("Priority", options=priority_options, default=priority_options, key="top_priority")
+                priority_filter = st.multiselect(
+                    "Priority", options=priority_options, default=priority_options, key="pc_top_priority"
+                )
 
             if issue_filter:
                 tc = tc[tc["issue_type"].astype(str).isin(issue_filter)]
@@ -2413,12 +2448,34 @@ def render_problem_candidates(db_url: str) -> None:
                 data=tc.to_csv(index=False).encode("utf-8"),
                 file_name="problem_candidate_top_cases_filtered.csv",
                 mime="text/csv",
+                key="dl_pc_top_cases_filtered",
             )
 
-            tc_display = tc.copy()
-            tc_display["cycle_hours"] = tc_display["cycle_hours"].map(lambda v: fmt_float(v, 2))
-            tc_display["customer_satisfaction"] = tc_display["customer_satisfaction"].map(lambda v: fmt_float(v, 2))
-            st.dataframe(tc_display, use_container_width=True, hide_index=True)
+            table_cols = [
+                "case_id",
+                "issue_type",
+                "priority",
+                "variant",
+                "report_channel",
+                "cycle_hours",
+                "customer_satisfaction",
+                "met_sla",
+                "has_reopen",
+                "has_reject",
+                "short_description_norm",
+            ]
+            tc_display = tc[table_cols].head(300).copy()
+            st.dataframe(
+                style_table(
+                    tc_display,
+                    hour_cols={"cycle_hours"},
+                    good_high_cols={"met_sla"},
+                    bad_high_cols={"cycle_hours", "has_reopen", "has_reject"},
+                    bad_low_cols={"customer_satisfaction", "met_sla"},
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
 
     with tabs[3]:
         st.markdown("#### Export")
@@ -2430,6 +2487,7 @@ def render_problem_candidates(db_url: str) -> None:
                 data=backlog_df.to_csv(index=False).encode("utf-8"),
                 file_name="v_problem_candidates.csv",
                 mime="text/csv",
+                key="dl_pc_backlog_export",
             )
 
         if top_cases_df.empty:
@@ -2440,15 +2498,30 @@ def render_problem_candidates(db_url: str) -> None:
                 data=top_cases_df.to_csv(index=False).encode("utf-8"),
                 file_name="v_problem_candidate_top_cases.csv",
                 mime="text/csv",
+                key="dl_pc_top_cases_export",
             )
 
         st.write(
             "Use backlog to pick prevention epics; use drilldown to create a problem record with evidence."
         )
-
-
 def render_channel_intake(db_url: str) -> None:
     header("Channel & Intake", "Compare intake channel effectiveness and identify problematic channel+issue combinations.")
+    ui_explainer(
+        "How to read this page",
+        what=[
+            "Compares intake channels on SLA, cycle time, CSAT, reject/reopen, and missing feedback.",
+            "Highlights where channel + issue combinations create avoidable friction.",
+        ],
+        why=[
+            "Improves intake forms, routing, and channel guidance to users.",
+            "Helps reduce preventable delays, rejects, and quality gaps.",
+        ],
+        how=[
+            "Start in Overview for baseline channel performance.",
+            "Use Channel Comparison to benchmark tradeoffs.",
+            "Use Bad Combos to isolate high-pain channel|issue combinations.",
+        ],
+    )
 
     try:
         channel_df = run_query(CHANNEL_SUMMARY_SQL)
@@ -2483,72 +2556,76 @@ def render_channel_intake(db_url: str) -> None:
 
             cycle_best = cdf.sort_values("avg_cycle_hours", ascending=True).iloc[0]
             cycle_worst = cdf.sort_values("avg_cycle_hours", ascending=False).iloc[0]
-            sla_best = cdf.sort_values("met_sla_rate", ascending=False).iloc[0]
-            sla_worst = cdf.sort_values("met_sla_rate", ascending=True).iloc[0]
-            csat_best = cdf.sort_values("avg_csat", ascending=False).iloc[0]
-            csat_worst = cdf.sort_values("avg_csat", ascending=True).iloc[0]
-
-            row1 = st.columns(3)
-            row2 = st.columns(3)
-            with row1[0]:
+            row_metrics = st.columns(2)
+            with row_metrics[0]:
                 metric_tile(
                     "Best Cycle Channel",
                     str(cycle_best["report_channel"]),
-                    f"{fmt_float(cycle_best['avg_cycle_hours'])} hrs",
-                    accent="#7FE0D6",
+                    f"{fmt_float(cycle_best['avg_cycle_hours'])} hrs avg cycle",
                 )
-            with row1[1]:
-                metric_tile(
-                    "Best SLA Channel",
-                    str(sla_best["report_channel"]),
-                    f"{fmt_pct(sla_best['met_sla_rate'])} met",
-                    accent="#7FE0D6",
-                )
-            with row1[2]:
-                metric_tile(
-                    "Best CSAT Channel",
-                    str(csat_best["report_channel"]),
-                    f"{fmt_float(csat_best['avg_csat'])} CSAT",
-                    accent="#7FE0D6",
-                )
-            with row2[0]:
+            with row_metrics[1]:
                 metric_tile(
                     "Worst Cycle Channel",
                     str(cycle_worst["report_channel"]),
-                    f"{fmt_float(cycle_worst['avg_cycle_hours'])} hrs",
-                )
-            with row2[1]:
-                metric_tile(
-                    "Worst SLA Channel",
-                    str(sla_worst["report_channel"]),
-                    f"{fmt_pct(sla_worst['met_sla_rate'])} met",
-                )
-            with row2[2]:
-                metric_tile(
-                    "Worst CSAT Channel",
-                    str(csat_worst["report_channel"]),
-                    f"{fmt_float(csat_worst['avg_csat'])} CSAT",
+                    f"{fmt_float(cycle_worst['avg_cycle_hours'])} hrs avg cycle",
                 )
 
-            st.divider()
-            st.markdown("#### Channel Ranking")
-            rank_df = cdf.copy()
-            rank_df["rank_cycle"] = rank_df["avg_cycle_hours"].rank(ascending=True, method="min")
-            rank_df["rank_sla"] = rank_df["met_sla_rate"].rank(ascending=False, method="min")
-            rank_df["rank_csat"] = rank_df["avg_csat"].rank(ascending=False, method="min")
-            rank_df["rank_score"] = rank_df["rank_cycle"] + rank_df["rank_sla"] + rank_df["rank_csat"]
-            rank_df = rank_df.sort_values(["rank_score", "cases"], ascending=[True, False])
-            rank_df["rank"] = range(1, len(rank_df) + 1)
+            top_channels = cdf.sort_values("cases", ascending=False).head(20).copy()
+            top_channels["cases"] = top_channels["cases"].astype("Int64")
+            table_cols = [
+                "report_channel",
+                "cases",
+                "avg_cycle_hours",
+                "p90_cycle_hours",
+                "avg_csat",
+                "met_sla_rate",
+                "reopen_rate",
+                "reject_rate",
+                "feedback_rate",
+                "missing_feedback_rate",
+            ]
+            st.dataframe(
+                style_table(
+                    top_channels[table_cols],
+                    pct_cols={"met_sla_rate", "reopen_rate", "reject_rate", "feedback_rate", "missing_feedback_rate"},
+                    hour_cols={"avg_cycle_hours", "p90_cycle_hours"},
+                    good_high_cols={"met_sla_rate", "avg_csat", "feedback_rate", "cases"},
+                    bad_high_cols={"avg_cycle_hours", "p90_cycle_hours", "reject_rate", "reopen_rate", "missing_feedback_rate"},
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
 
-            rank_display = rank_df[
-                ["rank", "report_channel", "cases", "avg_cycle_hours", "met_sla_rate", "avg_csat", "rank_score"]
-            ].copy()
-            rank_display["cases"] = rank_display["cases"].map(fmt_int)
-            rank_display["avg_cycle_hours"] = rank_display["avg_cycle_hours"].map(lambda v: fmt_float(v, 2))
-            rank_display["met_sla_rate"] = rank_display["met_sla_rate"].map(lambda v: fmt_pct(v, 1))
-            rank_display["avg_csat"] = rank_display["avg_csat"].map(lambda v: fmt_float(v, 2))
-            rank_display["rank_score"] = rank_display["rank_score"].map(lambda v: fmt_float(v, 1))
-            st.dataframe(rank_display, use_container_width=True, hide_index=True)
+            cycle_col, sla_col = st.columns(2)
+            with cycle_col:
+                fig_cycle = px.bar(cdf.sort_values("avg_cycle_hours", ascending=False), x="report_channel", y="avg_cycle_hours", text_auto=".2f")
+                fig_cycle.update_traces(hovertemplate="Channel=%{x}<br>Avg Cycle=%{y:.2f} hrs<extra></extra>")
+                st.plotly_chart(
+                    clayout(
+                        fig_cycle,
+                        title="Avg Cycle Hours by Channel",
+                        xtitle="Report Channel",
+                        ytitle="Avg Cycle (hrs)",
+                        h=420,
+                    ),
+                    use_container_width=True,
+                    key="ch_overview_avg_cycle",
+                )
+
+            with sla_col:
+                fig_sla = px.bar(cdf.sort_values("met_sla_rate", ascending=False), x="report_channel", y="met_sla_rate", text_auto=".1%")
+                fig_sla.update_traces(hovertemplate="Channel=%{x}<br>SLA Met=%{y:.1%}<extra></extra>")
+                st.plotly_chart(
+                    clayout(
+                        fig_sla,
+                        title="SLA Met Rate by Channel",
+                        xtitle="Report Channel",
+                        ytitle="Rate",
+                        h=420,
+                    ),
+                    use_container_width=True,
+                    key="ch_overview_sla_met",
+                )
 
     with tabs[1]:
         st.markdown("#### Channel Comparison")
@@ -2571,18 +2648,51 @@ def render_channel_intake(db_url: str) -> None:
             ]:
                 cdf[col] = pd.to_numeric(cdf[col], errors="coerce")
 
-            table_display = cdf.sort_values("cases", ascending=False).copy()
-            table_display["cases"] = table_display["cases"].map(fmt_int)
-            for col in ["avg_cycle_hours", "p90_cycle_hours", "avg_csat", "avg_escalations", "avg_resolver_changes"]:
-                table_display[col] = table_display[col].map(lambda v: fmt_float(v, 2))
-            for col in ["met_sla_rate", "reopen_rate", "reject_rate", "feedback_rate", "missing_feedback_rate"]:
-                table_display[col] = table_display[col].map(lambda v: fmt_pct(v, 1))
-            st.dataframe(table_display, use_container_width=True, hide_index=True)
+            rank_metric = st.selectbox(
+                "Rank channels by",
+                options=["cases", "avg_cycle_hours", "met_sla_rate", "avg_csat", "missing_feedback_rate"],
+                index=0,
+                key="ci_rank_metric",
+            )
+            ascending = rank_metric in {"avg_cycle_hours", "missing_feedback_rate"}
+            ranked = cdf.sort_values(rank_metric, ascending=ascending)
 
-            st.divider()
-            row1 = st.columns(2)
-            with row1[0]:
-                fig_cycle = px.bar(cdf, x="report_channel", y="avg_cycle_hours", text_auto=".2f")
+            table_cols = [
+                "report_channel",
+                "cases",
+                "avg_cycle_hours",
+                "p90_cycle_hours",
+                "avg_csat",
+                "met_sla_rate",
+                "reopen_rate",
+                "reject_rate",
+                "feedback_rate",
+                "missing_feedback_rate",
+                "avg_escalations",
+                "avg_resolver_changes",
+            ]
+            top20 = ranked[table_cols].head(20).copy()
+            top20["cases"] = top20["cases"].astype("Int64")
+            st.dataframe(
+                style_table(
+                    top20,
+                    pct_cols={"met_sla_rate", "reopen_rate", "reject_rate", "feedback_rate", "missing_feedback_rate"},
+                    hour_cols={"avg_cycle_hours", "p90_cycle_hours"},
+                    good_high_cols={"met_sla_rate", "avg_csat", "feedback_rate", "cases"},
+                    bad_high_cols={"avg_cycle_hours", "p90_cycle_hours", "reject_rate", "reopen_rate", "missing_feedback_rate"},
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            compare_left, compare_right = st.columns(2)
+            with compare_left:
+                fig_cycle = px.bar(
+                    cdf.sort_values("avg_cycle_hours", ascending=False),
+                    x="report_channel",
+                    y="avg_cycle_hours",
+                    text_auto=".2f",
+                )
                 fig_cycle.update_traces(
                     hovertemplate="Channel=%{x}<br>Avg Cycle=%{y:.2f} hrs<extra></extra>",
                 )
@@ -2592,12 +2702,19 @@ def render_channel_intake(db_url: str) -> None:
                         title="Avg Cycle Hours by Channel",
                         xtitle="Report Channel",
                         ytitle="Avg Cycle (hrs)",
-                        h=430,
+                        h=420,
                     ),
                     use_container_width=True,
+                    key="ch_compare_avg_cycle",
                 )
-            with row1[1]:
-                fig_sla = px.bar(cdf, x="report_channel", y="met_sla_rate", text_auto=".1%")
+
+            with compare_right:
+                fig_sla = px.bar(
+                    cdf.sort_values("met_sla_rate", ascending=False),
+                    x="report_channel",
+                    y="met_sla_rate",
+                    text_auto=".1%",
+                )
                 fig_sla.update_traces(
                     hovertemplate="Channel=%{x}<br>SLA Met=%{y:.1%}<extra></extra>",
                 )
@@ -2607,14 +2724,20 @@ def render_channel_intake(db_url: str) -> None:
                         title="SLA Met Rate by Channel",
                         xtitle="Report Channel",
                         ytitle="Rate",
-                        h=430,
+                        h=420,
                     ),
                     use_container_width=True,
+                    key="ch_compare_sla_met",
                 )
 
-            row2 = st.columns(2)
-            with row2[0]:
-                fig_feedback = px.bar(cdf, x="report_channel", y="missing_feedback_rate", text_auto=".1%")
+            extra_left, extra_right = st.columns(2)
+            with extra_left:
+                fig_feedback = px.bar(
+                    cdf.sort_values("missing_feedback_rate", ascending=False),
+                    x="report_channel",
+                    y="missing_feedback_rate",
+                    text_auto=".1%",
+                )
                 fig_feedback.update_traces(
                     hovertemplate="Channel=%{x}<br>Missing Feedback=%{y:.1%}<extra></extra>",
                 )
@@ -2624,21 +2747,21 @@ def render_channel_intake(db_url: str) -> None:
                         title="Missing Feedback Rate by Channel",
                         xtitle="Report Channel",
                         ytitle="Rate",
-                        h=430,
+                        h=420,
                     ),
                     use_container_width=True,
+                    key="ch_compare_missing_feedback",
                 )
-            with row2[1]:
+
+            with extra_right:
                 fig_scatter = px.scatter(
                     cdf,
                     x="avg_cycle_hours",
                     y="avg_csat",
-                    text="report_channel",
                     color="report_channel",
                     hover_name="report_channel",
                 )
                 fig_scatter.update_traces(
-                    textposition="top center",
                     marker=dict(size=12, line=dict(width=1, color="rgba(250,250,250,0.3)"), opacity=0.85),
                     hovertemplate="Channel=%{hovertext}<br>Avg Cycle=%{x:.2f} hrs<br>Avg CSAT=%{y:.2f}<extra></extra>",
                 )
@@ -2648,9 +2771,10 @@ def render_channel_intake(db_url: str) -> None:
                         title="Avg Cycle vs Avg CSAT by Channel",
                         xtitle="Avg Cycle (hrs)",
                         ytitle="Avg CSAT",
-                        h=430,
+                        h=420,
                     ),
                     use_container_width=True,
+                    key="ch_compare_cycle_vs_csat",
                 )
 
     with tabs[2]:
@@ -2678,13 +2802,23 @@ def render_channel_intake(db_url: str) -> None:
             fcols = st.columns([1.1, 1.2, 1.0])
             with fcols[0]:
                 channel_opts = sorted([str(v) for v in cidf["report_channel"].dropna().unique().tolist()])
-                selected_channels = st.multiselect("Channel", options=channel_opts, default=channel_opts)
+                selected_channels = st.multiselect(
+                    "Channel", options=channel_opts, default=channel_opts, key="ci_bad_channel"
+                )
             with fcols[1]:
                 issue_opts = sorted([str(v) for v in cidf["issue_type"].dropna().unique().tolist()])
-                selected_issues = st.multiselect("Issue Type", options=issue_opts, default=issue_opts)
+                selected_issues = st.multiselect(
+                    "Issue Type", options=issue_opts, default=issue_opts, key="ci_bad_issue"
+                )
             with fcols[2]:
                 max_cases = int(cidf["cases"].dropna().max()) if not cidf["cases"].dropna().empty else 25
-                min_cases = st.slider("Min Cases", min_value=1, max_value=max(max_cases, 1), value=min(25, max_cases))
+                min_cases = st.slider(
+                    "Min Cases",
+                    min_value=1,
+                    max_value=max(max_cases, 1),
+                    value=min(25, max_cases),
+                    key="ci_bad_min_cases",
+                )
 
             filtered = cidf.copy()
             if selected_channels:
@@ -2711,8 +2845,9 @@ def render_channel_intake(db_url: str) -> None:
             top25 = filtered.sort_values("pain_score", ascending=False).head(25).copy()
             filtered_bad_combos_for_export = top25.copy()
 
-            display = top25[
-                [
+            bad_left, bad_right = st.columns([1.25, 1.0])
+            with bad_left:
+                table_cols = [
                     "report_channel",
                     "issue_type",
                     "cases",
@@ -2725,49 +2860,73 @@ def render_channel_intake(db_url: str) -> None:
                     "reject_rate",
                     "missing_feedback_rate",
                 ]
-            ].copy()
-            display["cases"] = display["cases"].map(fmt_int)
-            for col in ["pain_score", "avg_cycle_hours", "p90_cycle_hours", "avg_csat"]:
-                display[col] = display[col].map(lambda v: fmt_float(v, 2))
-            for col in ["met_sla_rate", "reopen_rate", "reject_rate", "missing_feedback_rate"]:
-                display[col] = display[col].map(lambda v: fmt_pct(v, 1))
-            st.dataframe(display, use_container_width=True, hide_index=True)
-
-            st.download_button(
-                "Download filtered bad combos CSV",
-                data=top25.to_csv(index=False).encode("utf-8"),
-                file_name="channel_bad_combos_filtered.csv",
-                mime="text/csv",
-                key="dl_bad_combos_tab",
-            )
-
-            st.divider()
-            if top25.empty:
-                st.info("No rows match current bad-combo filters.")
-            else:
-                chart_df = top25.head(10).copy()
-                chart_df["combo_label"] = chart_df["report_channel"].astype(str) + " | " + chart_df["issue_type"].astype(str)
-                chart_df = chart_df.sort_values("pain_score", ascending=True)
-                fig_pain = px.bar(
-                    chart_df,
-                    x="pain_score",
-                    y="combo_label",
-                    orientation="h",
-                    text_auto=".2f",
-                )
-                fig_pain.update_traces(
-                    hovertemplate="Combo=%{y}<br>Pain Score=%{x:.2f}<extra></extra>",
-                )
-                st.plotly_chart(
-                    clayout(
-                        fig_pain,
-                        title="Top 10 Pain Scores (Channel | Issue)",
-                        xtitle="Pain Score",
-                        ytitle="Channel | Issue",
-                        h=520,
+                table_df = top25[table_cols].copy()
+                if not table_df.empty:
+                    table_df["cases"] = table_df["cases"].astype("Int64")
+                st.dataframe(
+                    style_table(
+                        table_df,
+                        pct_cols={"met_sla_rate", "reopen_rate", "reject_rate", "missing_feedback_rate"},
+                        hour_cols={"avg_cycle_hours", "p90_cycle_hours"},
+                        good_high_cols={"met_sla_rate", "avg_csat", "cases"},
+                        bad_high_cols={"pain_score", "avg_cycle_hours", "p90_cycle_hours", "reopen_rate", "reject_rate", "missing_feedback_rate"},
                     ),
                     use_container_width=True,
+                    hide_index=True,
                 )
+
+                st.download_button(
+                    "Download filtered bad combos CSV",
+                    data=top25.to_csv(index=False).encode("utf-8"),
+                    file_name="channel_bad_combos_filtered.csv",
+                    mime="text/csv",
+                    key="dl_ci_bad_combos_filtered",
+                )
+
+            with bad_right:
+                if top25.empty:
+                    st.info("No rows match current bad-combo filters.")
+                else:
+                    chart_df = top25.head(10).copy()
+                    chart_df["combo_label"] = chart_df["report_channel"].astype(str) + " | " + chart_df["issue_type"].astype(str)
+                    chart_df = chart_df.sort_values("pain_score", ascending=True)
+                    fig_pain = px.bar(
+                        chart_df,
+                        x="pain_score",
+                        y="combo_label",
+                        orientation="h",
+                        text_auto=".2f",
+                    )
+                    fig_pain.update_traces(
+                        hovertemplate="Combo=%{y}<br>Pain Score=%{x:.2f}<extra></extra>",
+                    )
+                    st.plotly_chart(
+                        clayout(
+                            fig_pain,
+                            title="Top 10 Pain Scores (Channel | Issue)",
+                            xtitle="Pain Score",
+                            ytitle="Channel | Issue",
+                            h=520,
+                        ),
+                        use_container_width=True,
+                        key="ch_bad_combos_pain",
+                    )
+
+            if not top25.empty:
+                worst_combo = top25.iloc[0]
+                st.info(
+                    "Worst combo by pain_score: "
+                    f"{worst_combo['report_channel']} | {worst_combo['issue_type']} "
+                    f"(pain={fmt_float(worst_combo['pain_score'])}, cases={fmt_int(worst_combo['cases'])})."
+                )
+                missing_pool = top25[top25["cases"] >= min_cases].dropna(subset=["missing_feedback_rate"])
+                if not missing_pool.empty:
+                    worst_missing = missing_pool.sort_values("missing_feedback_rate", ascending=False).iloc[0]
+                    st.info(
+                        "Worst missing-feedback combo: "
+                        f"{worst_missing['report_channel']} | {worst_missing['issue_type']} "
+                        f"(missing_feedback={fmt_pct(worst_missing['missing_feedback_rate'])}, cases={fmt_int(worst_missing['cases'])})."
+                    )
 
     with tabs[3]:
         st.markdown("#### Export")
@@ -2779,7 +2938,7 @@ def render_channel_intake(db_url: str) -> None:
                 data=channel_df.to_csv(index=False).encode("utf-8"),
                 file_name="v_channel_summary.csv",
                 mime="text/csv",
-                key="dl_channel_summary",
+                key="dl_ci_channel_summary",
             )
 
         if filtered_bad_combos_for_export.empty:
@@ -2790,7 +2949,7 @@ def render_channel_intake(db_url: str) -> None:
                 data=filtered_bad_combos_for_export.to_csv(index=False).encode("utf-8"),
                 file_name="channel_bad_combos_filtered.csv",
                 mime="text/csv",
-                key="dl_bad_combos_export",
+                key="dl_ci_bad_combos_export",
             )
 
         st.write(
@@ -2802,10 +2961,24 @@ def render_channel_intake(db_url: str) -> None:
         st.write(
             "Channel comparisons reflect both process performance and data quality, not individual performance."
         )
-
-
 def render_knowledge_fcr(db_url: str) -> None:
     header("Knowledge & FCR", "Analyze FCR proxy performance and prioritize knowledge/training enablement opportunities.")
+    ui_explainer(
+        "How to read this page",
+        what=[
+            "Tracks FCR proxy, resolution-level mix, and enablement backlog by issue type.",
+            "Highlights where knowledge/training could increase L1 resolution.",
+        ],
+        why=[
+            "Higher L1 resolution typically reduces escalations, reopens, and overall cycle time.",
+            "Improves customer outcomes while reducing operational load.",
+        ],
+        how=[
+            "Start with Enablement Backlog to prioritize issue types.",
+            "Use Drilldown evidence to plan training/KB updates.",
+            "Export filtered case evidence for implementation tracking.",
+        ],
+    )
 
     try:
         overview_df = run_query(FCR_OVERVIEW_SQL)
@@ -2908,6 +3081,19 @@ def render_knowledge_fcr(db_url: str) -> None:
                         use_container_width=True,
                     )
 
+            top_opportunity = None
+            if not kb_df.empty:
+                kb_check = kb_df.copy()
+                kb_check["enablement_score"] = pd.to_numeric(kb_check["enablement_score"], errors="coerce")
+                kb_check = kb_check.sort_values("enablement_score", ascending=False)
+                if not kb_check.empty:
+                    top_opportunity = kb_check.iloc[0]
+            if top_opportunity is not None:
+                st.info(
+                    f"Overall FCR is {fmt_pct(k['fcr_rate'])}. Top issue_type opportunity: "
+                    f"{top_opportunity['issue_type']} (enablement_score={fmt_float(top_opportunity['enablement_score'])})."
+                )
+
     with tabs[1]:
         st.markdown("#### Knowledge Enablement Backlog")
         if kb_df.empty:
@@ -2938,15 +3124,20 @@ def render_knowledge_fcr(db_url: str) -> None:
                 "avg_cycle_hours",
                 "avg_csat",
             ]
-            display = kb[table_cols].copy()
-            display["cases"] = display["cases"].map(fmt_int)
-            for col in ["enablement_score", "avg_cycle_hours", "avg_csat"]:
-                display[col] = display[col].map(lambda v: fmt_float(v, 2))
-            for col in ["l1_solved_rate", "l2_or_l3_rate", "escalation_to_l2_rate", "reopen_rate"]:
-                display[col] = display[col].map(lambda v: fmt_pct(v, 1))
-            st.dataframe(display, use_container_width=True, hide_index=True)
+            table_df = kb[table_cols].head(30).copy()
+            table_df["cases"] = table_df["cases"].astype("Int64")
+            st.dataframe(
+                style_table(
+                    table_df,
+                    pct_cols={"l1_solved_rate", "l2_or_l3_rate", "escalation_to_l2_rate", "reopen_rate"},
+                    hour_cols={"avg_cycle_hours"},
+                    good_high_cols={"l1_solved_rate", "avg_csat", "cases"},
+                    bad_high_cols={"enablement_score", "l2_or_l3_rate", "escalation_to_l2_rate", "reopen_rate"},
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
 
-            st.divider()
             top10 = kb.head(10).copy().sort_values("enablement_score", ascending=True)
             fig_enable = px.bar(
                 top10,
@@ -3013,6 +3204,57 @@ def render_knowledge_fcr(db_url: str) -> None:
                 ].sort_values("cycle_hours", ascending=False).head(200)
                 fcr_wins = drill_df[drill_df["fcr"] == True].sort_values("cycle_hours", ascending=False).head(200)
 
+                split_left, split_right = st.columns(2)
+                with split_left:
+                    st.markdown("##### Escalated / Not FCR (Top 200)")
+                    esc_cols = [
+                        "case_id",
+                        "priority",
+                        "variant",
+                        "report_channel",
+                        "cycle_hours",
+                        "customer_satisfaction",
+                        "met_sla",
+                        "resolution_level",
+                        "fcr",
+                    ]
+                    st.dataframe(
+                        style_table(
+                            escalated_cases[esc_cols],
+                            hour_cols={"cycle_hours"},
+                            good_high_cols={"met_sla"},
+                            bad_high_cols={"cycle_hours"},
+                            bad_low_cols={"customer_satisfaction", "met_sla"},
+                        ),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+                with split_right:
+                    st.markdown("##### FCR Wins (Top 200)")
+                    win_cols = [
+                        "case_id",
+                        "priority",
+                        "variant",
+                        "report_channel",
+                        "cycle_hours",
+                        "customer_satisfaction",
+                        "met_sla",
+                        "resolution_level",
+                        "fcr",
+                    ]
+                    st.dataframe(
+                        style_table(
+                            fcr_wins[win_cols],
+                            hour_cols={"cycle_hours"},
+                            good_high_cols={"met_sla", "fcr"},
+                            bad_high_cols={"cycle_hours"},
+                            bad_low_cols={"customer_satisfaction", "met_sla"},
+                        ),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
                 st.download_button(
                     "Download escalated cases CSV",
                     data=escalated_cases.to_csv(index=False).encode("utf-8"),
@@ -3026,54 +3268,6 @@ def render_knowledge_fcr(db_url: str) -> None:
                     file_name=f"fcr_wins_{selected_issue}.csv",
                     mime="text/csv",
                     key="dl_kfcr_fcr_wins",
-                )
-
-                st.markdown("##### Escalated Cases (Top 200)")
-                esc_display = escalated_cases.copy()
-                esc_display["cycle_hours"] = esc_display["cycle_hours"].map(lambda v: fmt_float(v, 2))
-                esc_display["customer_satisfaction"] = esc_display["customer_satisfaction"].map(
-                    lambda v: fmt_float(v, 2)
-                )
-                st.dataframe(
-                    esc_display[
-                        [
-                            "case_id",
-                            "priority",
-                            "variant",
-                            "report_channel",
-                            "cycle_hours",
-                            "customer_satisfaction",
-                            "met_sla",
-                            "resolution_level",
-                            "fcr",
-                        ]
-                    ],
-                    use_container_width=True,
-                    hide_index=True,
-                )
-
-                st.markdown("##### FCR Wins (Top 200)")
-                win_display = fcr_wins.copy()
-                win_display["cycle_hours"] = win_display["cycle_hours"].map(lambda v: fmt_float(v, 2))
-                win_display["customer_satisfaction"] = win_display["customer_satisfaction"].map(
-                    lambda v: fmt_float(v, 2)
-                )
-                st.dataframe(
-                    win_display[
-                        [
-                            "case_id",
-                            "priority",
-                            "variant",
-                            "report_channel",
-                            "cycle_hours",
-                            "customer_satisfaction",
-                            "met_sla",
-                            "resolution_level",
-                            "fcr",
-                        ]
-                    ],
-                    use_container_width=True,
-                    hide_index=True,
                 )
 
                 hist_df = drill_df.dropna(subset=["cycle_hours"]).copy()
@@ -3146,8 +3340,6 @@ def render_knowledge_fcr(db_url: str) -> None:
             "FCR proxy is defined as solved by L1 with no escalation to L2/L3 and no reopen. "
             "Use these metrics to prioritize knowledge and training investments."
         )
-
-
 def main() -> None:
     st.markdown(
         f"""
@@ -3303,5 +3495,8 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+
 
 
