@@ -146,6 +146,81 @@ FROM im.v_dwell_by_event
 ORDER BY avg_dwell_hours DESC;
 """
 
+HANDOFF_SUMMARY_SQL = """
+SELECT
+  variant,
+  issue_type,
+  cases,
+  avg_cycle_hours,
+  p90_cycle_hours,
+  avg_csat,
+  met_sla_rate,
+  avg_escalations,
+  avg_resolver_changes,
+  handoff_rate,
+  high_handoff_rate,
+  pingpong_rate
+FROM im.v_handoff_summary;
+"""
+
+PINGPONG_CASES_SQL = """
+SELECT
+  case_id,
+  variant,
+  priority,
+  issue_type,
+  report_channel,
+  cycle_hours,
+  customer_satisfaction,
+  escalation_count,
+  resolver_changes,
+  pingpong_transitions,
+  has_reopen,
+  has_reject,
+  met_sla
+FROM im.v_pingpong_cases;
+"""
+
+WORST_HANDOFF_SQL = """
+SELECT
+  case_id,
+  variant,
+  priority,
+  issue_type,
+  report_channel,
+  cycle_hours,
+  customer_satisfaction,
+  met_sla,
+  escalation_count,
+  resolver_changes,
+  has_reopen,
+  has_reject,
+  has_feedback
+FROM im.v_worst_handoff_cases;
+"""
+
+PINGPONG_KPI_SQL = """
+SELECT
+  count(*) AS pingpong_cases,
+  avg(cycle_hours) AS avg_cycle_hours_pingpong,
+  avg(customer_satisfaction) AS avg_csat_pingpong,
+  avg(CASE WHEN met_sla THEN 1 ELSE 0 END) AS met_sla_rate_pingpong,
+  avg(resolver_changes) AS avg_resolver_changes_pingpong,
+  avg(escalation_count) AS avg_escalations_pingpong
+FROM im.v_pingpong_cases;
+"""
+
+OVERALL_HANDOFF_BASELINE_SQL = """
+SELECT
+  count(*) AS overall_cases,
+  avg(cycle_hours) AS avg_cycle_hours_overall,
+  avg(customer_satisfaction) AS avg_csat_overall,
+  avg(CASE WHEN met_sla THEN 1 ELSE 0 END) AS met_sla_rate_overall,
+  avg(resolver_changes) AS avg_resolver_changes_overall,
+  avg(escalation_count) AS avg_escalations_overall
+FROM im.v_case_sla;
+"""
+
 
 def fmt_int(value: object) -> str:
     if pd.isna(value):
@@ -787,6 +862,284 @@ def render_bottlenecks(db_url: str) -> None:
         )
 
 
+def render_escalations_handoffs(db_url: str) -> None:
+    header("Escalations & Handoffs", "Analyze handoff tax, escalation intensity, and ping-pong behavior.")
+    st.caption("Handoffs = resolver_changes")
+    st.caption("Escalations = escalation_count")
+    st.caption("Ping-pong = level 2 <-> level 3 bouncing inferred from event transitions")
+
+    try:
+        handoff_df = run_query(db_url, HANDOFF_SUMMARY_SQL)
+        pingpong_df = run_query(db_url, PINGPONG_CASES_SQL)
+        worst_df = run_query(db_url, WORST_HANDOFF_SQL)
+        pingpong_kpi_df = run_query(db_url, PINGPONG_KPI_SQL)
+        overall_kpi_df = run_query(db_url, OVERALL_HANDOFF_BASELINE_SQL)
+    except Exception as exc:
+        st.error(f"Failed to query escalation/handoff views: {exc}")
+        st.stop()
+
+    tab_overview, tab_hotspots, tab_pingpong, tab_worklist = st.tabs(
+        ["Overview", "Hotspots", "Ping-Pong Cases", "Worklist"]
+    )
+
+    with tab_overview:
+        st.markdown("#### Cohort Comparison: Ping-Pong vs Overall")
+        if pingpong_kpi_df.empty or overall_kpi_df.empty:
+            st.info("Not enough KPI data to compare ping-pong cohort versus overall baseline.")
+        else:
+            p = pingpong_kpi_df.iloc[0]
+            o = overall_kpi_df.iloc[0]
+            compare_metrics = [
+                ("Cases", p["pingpong_cases"], o["overall_cases"], fmt_int),
+                ("Avg Cycle (hrs)", p["avg_cycle_hours_pingpong"], o["avg_cycle_hours_overall"], fmt_float),
+                ("Avg CSAT", p["avg_csat_pingpong"], o["avg_csat_overall"], fmt_float),
+                ("SLA Met %", p["met_sla_rate_pingpong"], o["met_sla_rate_overall"], fmt_pct),
+                (
+                    "Avg Resolver Changes",
+                    p["avg_resolver_changes_pingpong"],
+                    o["avg_resolver_changes_overall"],
+                    fmt_float,
+                ),
+                ("Avg Escalations", p["avg_escalations_pingpong"], o["avg_escalations_overall"], fmt_float),
+            ]
+
+            row_a = st.columns(3)
+            row_b = st.columns(3)
+            for idx, (label, ping_val, base_val, formatter) in enumerate(compare_metrics):
+                target_col = row_a[idx] if idx < 3 else row_b[idx - 3]
+                with target_col:
+                    metric_tile(
+                        label,
+                        formatter(ping_val),
+                        sublabel=f"Ping-pong cohort | Overall {formatter(base_val)}",
+                    )
+
+    with tab_hotspots:
+        st.markdown("#### Handoff Hotspots")
+        if handoff_df.empty:
+            st.info("No rows in im.v_handoff_summary.")
+        else:
+            handoff_num = handoff_df.copy()
+            num_cols = [
+                "cases",
+                "avg_cycle_hours",
+                "p90_cycle_hours",
+                "avg_csat",
+                "met_sla_rate",
+                "avg_escalations",
+                "avg_resolver_changes",
+                "handoff_rate",
+                "high_handoff_rate",
+                "pingpong_rate",
+            ]
+            for col in num_cols:
+                handoff_num[col] = pd.to_numeric(handoff_num[col], errors="coerce")
+
+            ranked = handoff_num.sort_values(["high_handoff_rate", "cases"], ascending=[False, False])
+            top25 = ranked.head(25).copy()
+
+            col_table, col_chart = st.columns([1.25, 1.0])
+            with col_table:
+                display_cols = [
+                    "variant",
+                    "issue_type",
+                    "cases",
+                    "avg_cycle_hours",
+                    "p90_cycle_hours",
+                    "avg_csat",
+                    "met_sla_rate",
+                    "avg_resolver_changes",
+                    "avg_escalations",
+                    "handoff_rate",
+                    "high_handoff_rate",
+                    "pingpong_rate",
+                ]
+                top25_display = top25[display_cols].copy()
+                top25_display["cases"] = top25_display["cases"].map(fmt_int)
+                for col in ["avg_cycle_hours", "p90_cycle_hours", "avg_csat", "avg_resolver_changes", "avg_escalations"]:
+                    top25_display[col] = top25_display[col].map(lambda v: fmt_float(v, 2))
+                for col in ["met_sla_rate", "handoff_rate", "high_handoff_rate", "pingpong_rate"]:
+                    top25_display[col] = top25_display[col].map(lambda v: fmt_pct(v, 1))
+
+                st.dataframe(top25_display, use_container_width=True, hide_index=True)
+
+            with col_chart:
+                top10_hot = ranked.head(10).copy()
+                top10_hot["label"] = top10_hot["variant"].astype(str) + " | " + top10_hot["issue_type"].astype(str)
+                top10_hot = top10_hot.sort_values("high_handoff_rate", ascending=True)
+                fig_hot = px.bar(
+                    top10_hot,
+                    x="high_handoff_rate",
+                    y="label",
+                    orientation="h",
+                    text_auto=".1%",
+                )
+                fig_hot.update_traces(
+                    marker_color=ACCENT,
+                    hovertemplate="Group=%{y}<br>High Handoff=%{x:.1%}<extra></extra>",
+                )
+                st.plotly_chart(
+                    clayout(
+                        fig_hot,
+                        title="Top 10 High-Handoff Groups",
+                        xtitle="High Handoff Rate",
+                        ytitle="Variant | Issue Type",
+                        h=560,
+                    ),
+                    use_container_width=True,
+                )
+
+    with tab_pingpong:
+        st.markdown("#### Ping-Pong Explorer")
+        if pingpong_df.empty:
+            st.info("No rows in im.v_pingpong_cases.")
+        else:
+            cases_df = pingpong_df.copy()
+            numeric_cols = [
+                "cycle_hours",
+                "customer_satisfaction",
+                "escalation_count",
+                "resolver_changes",
+                "pingpong_transitions",
+            ]
+            for col in numeric_cols:
+                cases_df[col] = pd.to_numeric(cases_df[col], errors="coerce")
+
+            filter_col1, filter_col2, filter_col3 = st.columns([1.0, 1.2, 0.9])
+            with filter_col1:
+                priority_opts = sorted([str(v) for v in cases_df["priority"].dropna().unique().tolist()])
+                selected_priorities = st.multiselect("Priority", options=priority_opts, default=priority_opts)
+            with filter_col2:
+                issue_opts = sorted([str(v) for v in cases_df["issue_type"].dropna().unique().tolist()])
+                selected_issues = st.multiselect("Issue Type", options=issue_opts, default=issue_opts)
+            with filter_col3:
+                sla_filter = st.selectbox("SLA", options=["All", "Met", "Missed"], index=0)
+
+            filtered = cases_df.copy()
+            if selected_priorities:
+                filtered = filtered[filtered["priority"].astype(str).isin(selected_priorities)]
+            else:
+                filtered = filtered.iloc[0:0]
+            if selected_issues:
+                filtered = filtered[filtered["issue_type"].astype(str).isin(selected_issues)]
+            else:
+                filtered = filtered.iloc[0:0]
+
+            if sla_filter == "Met":
+                filtered = filtered[filtered["met_sla"] == True]
+            elif sla_filter == "Missed":
+                filtered = filtered[filtered["met_sla"] == False]
+
+            filtered = filtered.sort_values(
+                ["resolver_changes", "escalation_count", "cycle_hours"],
+                ascending=[False, False, False],
+            )
+
+            csv_pingpong = filtered.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                "Download filtered ping-pong CSV",
+                data=csv_pingpong,
+                file_name="pingpong_cases_filtered.csv",
+                mime="text/csv",
+            )
+
+            top50 = filtered.head(50).copy()
+            top50_display = top50.copy()
+            top50_display["cycle_hours"] = top50_display["cycle_hours"].map(lambda v: fmt_float(v, 2))
+            top50_display["customer_satisfaction"] = top50_display["customer_satisfaction"].map(
+                lambda v: fmt_float(v, 2)
+            )
+            top50_display["resolver_changes"] = top50_display["resolver_changes"].map(fmt_int)
+            top50_display["escalation_count"] = top50_display["escalation_count"].map(fmt_int)
+            top50_display["pingpong_transitions"] = top50_display["pingpong_transitions"].map(fmt_int)
+
+            st.dataframe(
+                top50_display[
+                    [
+                        "case_id",
+                        "priority",
+                        "issue_type",
+                        "variant",
+                        "cycle_hours",
+                        "customer_satisfaction",
+                        "met_sla",
+                        "resolver_changes",
+                        "escalation_count",
+                        "pingpong_transitions",
+                        "has_reopen",
+                        "has_reject",
+                    ]
+                ],
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            if filtered.empty:
+                st.info("No rows match current filter selection.")
+            else:
+                plot_df = filtered.dropna(subset=["resolver_changes", "cycle_hours", "pingpong_transitions"]).copy()
+                if plot_df.empty:
+                    st.info("Not enough numeric data for ping-pong scatter chart.")
+                else:
+                    fig_scatter = px.scatter(
+                        plot_df,
+                        x="resolver_changes",
+                        y="cycle_hours",
+                        size="pingpong_transitions",
+                        color="priority",
+                        hover_name="case_id",
+                        size_max=56,
+                    )
+                    fig_scatter.update_traces(
+                        marker=dict(line=dict(width=1, color="rgba(250,250,250,0.35)"), opacity=0.82),
+                        hovertemplate=(
+                            "Case=%{hovertext}<br>Resolver Changes=%{x:.0f}<br>Cycle=%{y:.2f} hrs"
+                            "<br>Ping-Pong Transitions=%{marker.size:.0f}<extra></extra>"
+                        ),
+                    )
+                    st.plotly_chart(
+                        clayout(
+                            fig_scatter,
+                            title="Resolver Changes vs Cycle Time (Ping-Pong Cases)",
+                            xtitle="Resolver Changes",
+                            ytitle="Cycle Hours",
+                            h=520,
+                        ),
+                        use_container_width=True,
+                    )
+
+    with tab_worklist:
+        st.markdown("#### Ops Worklist: Worst Handoff Cases")
+        if worst_df.empty:
+            st.info("No rows in im.v_worst_handoff_cases.")
+        else:
+            worklist = worst_df.copy()
+            for col in ["cycle_hours", "customer_satisfaction", "escalation_count", "resolver_changes"]:
+                worklist[col] = pd.to_numeric(worklist[col], errors="coerce")
+            worklist = worklist.sort_values(
+                ["resolver_changes", "escalation_count", "cycle_hours"],
+                ascending=[False, False, False],
+            )
+
+            csv_worklist = worklist.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                "Download worklist CSV",
+                data=csv_worklist,
+                file_name="worst_handoff_cases.csv",
+                mime="text/csv",
+            )
+
+            worklist_display = worklist.copy()
+            worklist_display["cycle_hours"] = worklist_display["cycle_hours"].map(lambda v: fmt_float(v, 2))
+            worklist_display["customer_satisfaction"] = worklist_display["customer_satisfaction"].map(
+                lambda v: fmt_float(v, 2)
+            )
+            worklist_display["escalation_count"] = worklist_display["escalation_count"].map(fmt_int)
+            worklist_display["resolver_changes"] = worklist_display["resolver_changes"].map(fmt_int)
+
+            st.dataframe(worklist_display, use_container_width=True, hide_index=True)
+
+
 def main() -> None:
     with st.sidebar:
         st.title("IncidentOps")
@@ -797,7 +1150,7 @@ def main() -> None:
                 "Executive Overview",
                 "Process Explorer",
                 "Bottlenecks",
-                "Escalations & Handoffs (coming soon)",
+                "Escalations & Handoffs",
                 "Quality & CX (coming soon)",
                 "Problem Candidates (coming soon)",
             ],
@@ -820,6 +1173,8 @@ def main() -> None:
         render_process_explorer(db_url)
     elif page == "Bottlenecks":
         render_bottlenecks(db_url)
+    elif page == "Escalations & Handoffs":
+        render_escalations_handoffs(db_url)
     else:
         render_coming_soon(page)
 
