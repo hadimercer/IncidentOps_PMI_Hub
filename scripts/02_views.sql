@@ -459,3 +459,50 @@ ORDER BY
     vpcc.has_reopen DESC,
     vpcc.has_reject DESC
 LIMIT 500;
+
+CREATE OR REPLACE VIEW im.v_channel_summary AS
+SELECT
+    vcs.report_channel,
+    COUNT(*) AS cases,
+    AVG(vcs.cycle_hours) AS avg_cycle_hours,
+    percentile_cont(0.9) WITHIN GROUP (ORDER BY vcs.cycle_hours) AS p90_cycle_hours,
+    AVG(vcs.customer_satisfaction) AS avg_csat,
+    AVG(
+        CASE
+            WHEN vcs.met_sla IS TRUE THEN 1.0
+            WHEN vcs.met_sla IS FALSE THEN 0.0
+            ELSE NULL
+        END
+    ) AS met_sla_rate,
+    AVG(CASE WHEN vcs.has_reopen THEN 1.0 ELSE 0.0 END) AS reopen_rate,
+    AVG(CASE WHEN vcs.has_reject THEN 1.0 ELSE 0.0 END) AS reject_rate,
+    AVG(vcs.escalation_count::double precision) AS avg_escalations,
+    AVG(vcs.resolver_changes::double precision) AS avg_resolver_changes,
+    AVG(CASE WHEN vcs.has_feedback THEN 1.0 ELSE 0.0 END) AS feedback_rate,
+    1.0 - AVG(CASE WHEN vcs.has_feedback THEN 1.0 ELSE 0.0 END) AS missing_feedback_rate
+FROM im.v_case_sla vcs
+GROUP BY vcs.report_channel;
+
+CREATE OR REPLACE VIEW im.v_channel_issue_summary AS
+SELECT
+    vcs.report_channel,
+    vcs.issue_type,
+    COUNT(*) AS cases,
+    AVG(vcs.cycle_hours) AS avg_cycle_hours,
+    percentile_cont(0.9) WITHIN GROUP (ORDER BY vcs.cycle_hours) AS p90_cycle_hours,
+    AVG(vcs.customer_satisfaction) AS avg_csat,
+    AVG(
+        CASE
+            WHEN vcs.met_sla IS TRUE THEN 1.0
+            WHEN vcs.met_sla IS FALSE THEN 0.0
+            ELSE NULL
+        END
+    ) AS met_sla_rate,
+    AVG(CASE WHEN vcs.has_reopen THEN 1.0 ELSE 0.0 END) AS reopen_rate,
+    AVG(CASE WHEN vcs.has_reject THEN 1.0 ELSE 0.0 END) AS reject_rate,
+    AVG(vcs.escalation_count::double precision) AS avg_escalations,
+    AVG(vcs.resolver_changes::double precision) AS avg_resolver_changes,
+    AVG(CASE WHEN vcs.has_feedback THEN 1.0 ELSE 0.0 END) AS feedback_rate,
+    1.0 - AVG(CASE WHEN vcs.has_feedback THEN 1.0 ELSE 0.0 END) AS missing_feedback_rate
+FROM im.v_case_sla vcs
+GROUP BY vcs.report_channel, vcs.issue_type;
