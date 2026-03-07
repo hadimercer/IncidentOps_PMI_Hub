@@ -2,6 +2,56 @@
 
 CREATE SCHEMA IF NOT EXISTS im;
 
+DROP VIEW IF EXISTS im.v_kb_enablement_candidates CASCADE;
+DROP VIEW IF EXISTS im.v_fcr_summary CASCADE;
+DROP VIEW IF EXISTS im.v_fcr_cases CASCADE;
+DROP VIEW IF EXISTS im.v_resolution_level CASCADE;
+DROP VIEW IF EXISTS im.v_channel_issue_summary CASCADE;
+DROP VIEW IF EXISTS im.v_channel_summary CASCADE;
+DROP VIEW IF EXISTS im.v_problem_candidate_top_cases CASCADE;
+DROP VIEW IF EXISTS im.v_problem_candidates CASCADE;
+DROP VIEW IF EXISTS im.v_problem_candidate_cases CASCADE;
+DROP VIEW IF EXISTS im.v_cx_breakdown CASCADE;
+DROP VIEW IF EXISTS im.v_cx_summary CASCADE;
+DROP VIEW IF EXISTS im.v_closure_compliance CASCADE;
+DROP VIEW IF EXISTS im.v_worst_handoff_cases CASCADE;
+DROP VIEW IF EXISTS im.v_handoff_summary CASCADE;
+DROP VIEW IF EXISTS im.v_pingpong_cases CASCADE;
+DROP VIEW IF EXISTS im.v_transition_by_variant CASCADE;
+DROP VIEW IF EXISTS im.v_dwell_by_event CASCADE;
+DROP VIEW IF EXISTS im.v_transition_summary CASCADE;
+DROP VIEW IF EXISTS im.v_variant_summary CASCADE;
+DROP VIEW IF EXISTS im.v_case_sla CASCADE;
+DROP VIEW IF EXISTS im.v_case CASCADE;
+DROP VIEW IF EXISTS im.v_event_seq CASCADE;
+DROP VIEW IF EXISTS im.v_event_normalized CASCADE;
+
+CREATE OR REPLACE VIEW im.v_event_normalized AS
+SELECT
+    er.event_key,
+    er.case_id,
+    er.variant,
+    er.priority,
+    er.reporter,
+    er.ts,
+    er.event AS raw_event_name,
+    COALESCE(ea.event_code, er.event) AS event,
+    ea.event_code,
+    er.issue_type,
+    er.resolver,
+    er.report_channel,
+    er.short_description,
+    er.customer_satisfaction,
+    CASE
+        WHEN ea.event_code IN ('ticket_solved_l1', 'assigned_to_l1', 'work_in_progress_l1') THEN 'L1'
+        WHEN ea.event_code IN ('ticket_solved_l2', 'assigned_to_l2', 'escalated_to_l2', 'work_in_progress_l2') THEN 'L2'
+        WHEN ea.event_code IN ('ticket_solved_l3', 'assigned_to_l3', 'escalated_to_l3', 'work_in_progress_l3') THEN 'L3'
+        ELSE NULL
+    END AS event_level
+FROM im.event_raw er
+LEFT JOIN im.event_alias ea
+    ON ea.raw_event_name = er.event;
+
 CREATE OR REPLACE VIEW im.v_event_seq AS
 SELECT
     s.case_id,
@@ -10,6 +60,9 @@ SELECT
     s.reporter,
     s.ts,
     s.event,
+    s.raw_event_name,
+    s.event_code,
+    s.event_level,
     s.issue_type,
     s.resolver,
     s.report_channel,
@@ -18,79 +71,160 @@ SELECT
     s.seq,
     s.next_ts,
     s.next_event,
+    s.next_raw_event_name,
+    s.next_event_code,
+    s.next_event_level,
     EXTRACT(EPOCH FROM (s.next_ts - s.ts)) / 3600.0 AS delta_hours
 FROM (
     SELECT
-        er.case_id,
-        er.variant,
-        er.priority,
-        er.reporter,
-        er.ts,
-        er.event,
-        er.issue_type,
-        er.resolver,
-        er.report_channel,
-        er.short_description,
-        er.customer_satisfaction,
+        ven.case_id,
+        ven.variant,
+        ven.priority,
+        ven.reporter,
+        ven.ts,
+        ven.event,
+        ven.raw_event_name,
+        ven.event_code,
+        ven.event_level,
+        ven.issue_type,
+        ven.resolver,
+        ven.report_channel,
+        ven.short_description,
+        ven.customer_satisfaction,
         ROW_NUMBER() OVER (
-            PARTITION BY er.case_id
-            ORDER BY er.ts, er.event
+            PARTITION BY ven.case_id
+            ORDER BY ven.ts, ven.event_key
         ) AS seq,
-        LEAD(er.ts) OVER (
-            PARTITION BY er.case_id
-            ORDER BY er.ts, er.event
+        LEAD(ven.ts) OVER (
+            PARTITION BY ven.case_id
+            ORDER BY ven.ts, ven.event_key
         ) AS next_ts,
-        LEAD(er.event) OVER (
-            PARTITION BY er.case_id
-            ORDER BY er.ts, er.event
-        ) AS next_event
-    FROM im.event_raw er
+        LEAD(ven.event) OVER (
+            PARTITION BY ven.case_id
+            ORDER BY ven.ts, ven.event_key
+        ) AS next_event,
+        LEAD(ven.raw_event_name) OVER (
+            PARTITION BY ven.case_id
+            ORDER BY ven.ts, ven.event_key
+        ) AS next_raw_event_name,
+        LEAD(ven.event_code) OVER (
+            PARTITION BY ven.case_id
+            ORDER BY ven.ts, ven.event_key
+        ) AS next_event_code,
+        LEAD(ven.event_level) OVER (
+            PARTITION BY ven.case_id
+            ORDER BY ven.ts, ven.event_key
+        ) AS next_event_level
+    FROM im.v_event_normalized ven
 ) s;
 
 CREATE OR REPLACE VIEW im.v_case AS
-WITH case_rollup AS (
+WITH normalized AS (
+    SELECT *
+    FROM im.v_event_normalized
+),
+case_bounds AS (
     SELECT
-        er.case_id,
-        MAX(er.variant) AS variant,
-        MAX(er.priority) AS priority,
-        MAX(er.issue_type) AS issue_type,
-        MAX(er.report_channel) AS report_channel,
-        MIN(er.ts) FILTER (WHERE er.event = 'Ticket created') AS created_at,
-        MAX(er.ts) FILTER (WHERE er.event = 'Ticket closed') AS closed_at,
+        n.case_id,
+        COALESCE(
+            MIN(n.ts) FILTER (WHERE n.event_code = 'ticket_created'),
+            MIN(n.ts)
+        ) AS created_at,
+        MAX(n.ts) FILTER (WHERE n.event_code = 'ticket_closed') AS closed_at,
         COUNT(*) AS event_count,
-        COUNT(DISTINCT er.resolver) FILTER (
-            WHERE er.resolver IS NOT NULL
-              AND er.resolver <> ''
+        COUNT(DISTINCT n.resolver) FILTER (
+            WHERE n.resolver IS NOT NULL
+              AND n.resolver <> ''
         ) AS distinct_resolvers,
-        COUNT(*) FILTER (WHERE er.event ILIKE 'Ticket escalated%') AS escalation_count,
-        BOOL_OR(er.event = 'Customer feedback received') AS has_feedback,
-        BOOL_OR(er.event ILIKE '%reopen%') AS has_reopen,
-        BOOL_OR(er.event ILIKE '%reject%') AS has_reject,
-        MAX(er.customer_satisfaction) AS customer_satisfaction
-    FROM im.event_raw er
-    GROUP BY er.case_id
+        COUNT(*) FILTER (
+            WHERE n.event_code IN (
+                'escalated_to_l2',
+                'assigned_to_l2',
+                'escalated_to_l3',
+                'assigned_to_l3'
+            )
+        ) AS escalation_count,
+        BOOL_OR(n.event_code = 'customer_feedback_received') AS has_feedback,
+        BOOL_OR(n.event_code = 'ticket_reopened') AS has_reopen,
+        BOOL_OR(n.event_code = 'ticket_rejected') AS has_reject,
+        MAX(n.customer_satisfaction) AS customer_satisfaction
+    FROM normalized n
+    GROUP BY n.case_id
+),
+first_priority AS (
+    SELECT DISTINCT ON (n.case_id)
+        n.case_id,
+        n.priority
+    FROM normalized n
+    WHERE n.priority IS NOT NULL
+      AND n.priority <> ''
+    ORDER BY n.case_id, n.ts, n.event_key
+),
+first_issue_type AS (
+    SELECT DISTINCT ON (n.case_id)
+        n.case_id,
+        n.issue_type
+    FROM normalized n
+    WHERE n.issue_type IS NOT NULL
+      AND n.issue_type <> ''
+    ORDER BY n.case_id, n.ts, n.event_key
+),
+first_report_channel AS (
+    SELECT DISTINCT ON (n.case_id)
+        n.case_id,
+        n.report_channel
+    FROM normalized n
+    WHERE n.report_channel IS NOT NULL
+      AND n.report_channel <> ''
+    ORDER BY n.case_id, n.ts, n.event_key
+),
+variant_rank AS (
+    SELECT
+        n.case_id,
+        n.variant,
+        COUNT(*) AS variant_count,
+        MAX(n.ts) AS last_seen_ts
+    FROM normalized n
+    WHERE n.variant IS NOT NULL
+      AND n.variant <> ''
+    GROUP BY n.case_id, n.variant
+),
+variant_mode AS (
+    SELECT DISTINCT ON (vr.case_id)
+        vr.case_id,
+        vr.variant
+    FROM variant_rank vr
+    ORDER BY vr.case_id, vr.variant_count DESC, vr.last_seen_ts DESC, vr.variant
 )
 SELECT
-    cr.case_id,
-    cr.variant,
-    cr.priority,
-    cr.issue_type,
-    cr.report_channel,
-    cr.created_at,
-    cr.closed_at,
-    EXTRACT(EPOCH FROM (cr.closed_at - cr.created_at)) / 3600.0 AS cycle_hours,
-    cr.event_count,
-    cr.distinct_resolvers,
-    GREATEST(cr.distinct_resolvers - 1, 0) AS resolver_changes,
-    cr.escalation_count,
-    cr.has_feedback,
-    cr.has_reopen,
-    cr.has_reject,
-    cr.customer_satisfaction
-FROM case_rollup cr
-WHERE cr.created_at IS NOT NULL
-  AND cr.closed_at IS NOT NULL
-  AND cr.closed_at >= cr.created_at;
+    cb.case_id,
+    vm.variant,
+    fp.priority,
+    fi.issue_type,
+    frc.report_channel,
+    cb.created_at,
+    cb.closed_at,
+    EXTRACT(EPOCH FROM (cb.closed_at - cb.created_at)) / 3600.0 AS cycle_hours,
+    cb.event_count,
+    cb.distinct_resolvers,
+    GREATEST(cb.distinct_resolvers - 1, 0) AS resolver_changes,
+    cb.escalation_count,
+    cb.has_feedback,
+    cb.has_reopen,
+    cb.has_reject,
+    cb.customer_satisfaction
+FROM case_bounds cb
+LEFT JOIN variant_mode vm
+    ON vm.case_id = cb.case_id
+LEFT JOIN first_priority fp
+    ON fp.case_id = cb.case_id
+LEFT JOIN first_issue_type fi
+    ON fi.case_id = cb.case_id
+LEFT JOIN first_report_channel frc
+    ON frc.case_id = cb.case_id
+WHERE cb.created_at IS NOT NULL
+  AND cb.closed_at IS NOT NULL
+  AND cb.closed_at >= cb.created_at;
 
 CREATE OR REPLACE VIEW im.v_case_sla AS
 SELECT
@@ -188,13 +322,9 @@ WITH pingpong AS (
         ves.case_id,
         COUNT(*) AS pingpong_transitions
     FROM im.v_event_seq ves
-    WHERE (
-        ves.event ILIKE '%level 2%'
-        AND ves.next_event ILIKE '%level 3%'
-    ) OR (
-        ves.event ILIKE '%level 3%'
-        AND ves.next_event ILIKE '%level 2%'
-    )
+    WHERE ves.event_level IN ('L2', 'L3')
+      AND ves.next_event_level IN ('L2', 'L3')
+      AND ves.event_level <> ves.next_event_level
     GROUP BY ves.case_id
 )
 SELECT
@@ -265,21 +395,21 @@ LIMIT 200;
 CREATE OR REPLACE VIEW im.v_closure_compliance AS
 WITH last_close AS (
     SELECT
-        er.case_id,
-        MAX(er.ts) AS last_close_ts
-    FROM im.event_raw er
-    WHERE er.event = 'Ticket closed'
-    GROUP BY er.case_id
+        ven.case_id,
+        MAX(ven.ts) AS last_close_ts
+    FROM im.v_event_normalized ven
+    WHERE ven.event_code = 'ticket_closed'
+    GROUP BY ven.case_id
 ),
 first_reopen_after_close AS (
     SELECT
         lc.case_id,
-        MIN(er.ts) AS first_reopen_ts_after_close
+        MIN(ven.ts) AS first_reopen_ts_after_close
     FROM last_close lc
-    JOIN im.event_raw er
-        ON er.case_id = lc.case_id
-    WHERE er.event ILIKE '%reopen%'
-      AND er.ts > lc.last_close_ts
+    JOIN im.v_event_normalized ven
+        ON ven.case_id = lc.case_id
+    WHERE ven.event_code = 'ticket_reopened'
+      AND ven.ts > lc.last_close_ts
     GROUP BY lc.case_id
 )
 SELECT
@@ -356,13 +486,13 @@ GROUP BY vcc.issue_type, vcc.priority;
 CREATE OR REPLACE VIEW im.v_problem_candidate_cases AS
 WITH case_descriptions AS (
     SELECT
-        er.case_id,
-        MAX(er.short_description) AS short_description_raw,
+        ven.case_id,
+        MAX(ven.short_description) AS short_description_raw,
         NULLIF(
             trim(
                 regexp_replace(
                     regexp_replace(
-                        lower(COALESCE(MAX(er.short_description), '')),
+                        lower(COALESCE(MAX(ven.short_description), '')),
                         '[^a-z\s]+',
                         ' ',
                         'g'
@@ -374,8 +504,8 @@ WITH case_descriptions AS (
             ),
             ''
         ) AS short_description_norm
-    FROM im.event_raw er
-    GROUP BY er.case_id
+    FROM im.v_event_normalized ven
+    GROUP BY ven.case_id
 )
 SELECT
     vcs.case_id,
@@ -508,23 +638,34 @@ FROM im.v_case_sla vcs
 GROUP BY vcs.report_channel, vcs.issue_type;
 
 CREATE OR REPLACE VIEW im.v_resolution_level AS
-WITH event_flags AS (
+WITH case_close AS (
     SELECT
-        er.case_id,
-        BOOL_OR(er.event = 'Ticket solved by level 1 support') AS solved_l1,
-        BOOL_OR(er.event = 'Ticket solved by level 2 support') AS solved_l2,
-        BOOL_OR(er.event = 'Ticket solved by level 3 support') AS solved_l3,
-        BOOL_OR(er.event = 'Ticket reopened by customer') AS reopened,
-        BOOL_OR(
-            er.event IN (
-                'Ticket escalated to level 2 support',
-                'Level 1 escalates to level 2 support',
-                'Ticket assigned to level 2 support'
-            )
-        ) AS escalated_to_l2,
-        BOOL_OR(er.event = 'Level 2 escalates to level 3 support') AS escalated_to_l3
-    FROM im.event_raw er
-    GROUP BY er.case_id
+        vc.case_id,
+        vc.closed_at
+    FROM im.v_case vc
+),
+event_flags AS (
+    SELECT
+        ven.case_id,
+        BOOL_OR(ven.event_code = 'ticket_solved_l1') AS solved_l1,
+        BOOL_OR(ven.event_code = 'ticket_solved_l2') AS solved_l2,
+        BOOL_OR(ven.event_code = 'ticket_solved_l3') AS solved_l3,
+        BOOL_OR(ven.event_code = 'ticket_reopened') AS reopened,
+        BOOL_OR(ven.event_code IN ('escalated_to_l2', 'assigned_to_l2')) AS escalated_to_l2,
+        BOOL_OR(ven.event_code IN ('escalated_to_l3', 'assigned_to_l3')) AS escalated_to_l3
+    FROM im.v_event_normalized ven
+    GROUP BY ven.case_id
+),
+last_solve AS (
+    SELECT DISTINCT ON (ven.case_id)
+        ven.case_id,
+        ven.event_code
+    FROM im.v_event_normalized ven
+    JOIN case_close cc
+        ON cc.case_id = ven.case_id
+    WHERE ven.event_code IN ('ticket_solved_l1', 'ticket_solved_l2', 'ticket_solved_l3')
+      AND ven.ts <= cc.closed_at
+    ORDER BY ven.case_id, ven.ts DESC, ven.event_key DESC
 )
 SELECT
     vcs.case_id,
@@ -534,15 +675,17 @@ SELECT
     COALESCE(ef.reopened, FALSE) AS reopened,
     COALESCE(ef.escalated_to_l2, FALSE) AS escalated_to_l2,
     COALESCE(ef.escalated_to_l3, FALSE) AS escalated_to_l3,
-    CASE
-        WHEN COALESCE(ef.solved_l3, FALSE) THEN 'L3'
-        WHEN COALESCE(ef.solved_l2, FALSE) THEN 'L2'
-        WHEN COALESCE(ef.solved_l1, FALSE) THEN 'L1'
+    CASE ls.event_code
+        WHEN 'ticket_solved_l3' THEN 'L3'
+        WHEN 'ticket_solved_l2' THEN 'L2'
+        WHEN 'ticket_solved_l1' THEN 'L1'
         ELSE 'Unknown'
     END AS resolution_level
 FROM im.v_case_sla vcs
 LEFT JOIN event_flags ef
-    ON ef.case_id = vcs.case_id;
+    ON ef.case_id = vcs.case_id
+LEFT JOIN last_solve ls
+    ON ls.case_id = vcs.case_id;
 
 CREATE OR REPLACE VIEW im.v_fcr_cases AS
 SELECT
@@ -556,7 +699,7 @@ SELECT
     vcs.met_sla,
     vrl.resolution_level,
     (
-        vrl.solved_l1
+        vrl.resolution_level = 'L1'
         AND NOT vrl.reopened
         AND NOT vrl.escalated_to_l2
         AND NOT vrl.escalated_to_l3
@@ -609,3 +752,4 @@ FROM im.v_fcr_cases vfc
 JOIN im.v_resolution_level vrl
     ON vrl.case_id = vfc.case_id
 GROUP BY vfc.issue_type;
+

@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import re
 from collections import Counter
 from dataclasses import dataclass, field
+from datetime import timezone
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -30,7 +33,11 @@ TARGET_COLUMNS: List[str] = [
     "customer_satisfaction",
 ]
 
-REQUIRED_COLUMNS: List[str] = [col for col in TARGET_COLUMNS if col != "resolver"]
+REQUIRED_COLUMNS: List[str] = [
+    col for col in TARGET_COLUMNS if col not in {"resolver", "customer_satisfaction"}
+]
+
+DB_COLUMNS: List[str] = ["event_key", *TARGET_COLUMNS]
 
 TEXT_COLUMNS: List[str] = [
     "case_id",
@@ -68,12 +75,41 @@ COLUMN_ALIASES: Dict[str, List[str]] = {
     "customer_satisfaction": ["csat", "satisfaction", "customer_rating", "sat_score", "rating"],
 }
 
-INSERT_SQL = """
-INSERT INTO im.event_raw (
-    case_id, variant, priority, reporter, ts, event, issue_type, resolver,
-    report_channel, short_description, customer_satisfaction
+STAGE_INSERT_SQL = """
+INSERT INTO im.event_stage (
+    event_key, case_id, variant, priority, reporter, ts, event, issue_type,
+    resolver, report_channel, short_description, customer_satisfaction
 )
 VALUES %s
+ON CONFLICT (event_key) DO NOTHING
+"""
+
+RAW_INSERT_SQL = """
+WITH batch_keys AS (
+    SELECT DISTINCT UNNEST(%s::text[]) AS event_key
+)
+INSERT INTO im.event_raw (
+    event_key, case_id, variant, priority, reporter, ts, event, issue_type,
+    resolver, report_channel, short_description, customer_satisfaction
+)
+SELECT
+    es.event_key,
+    es.case_id,
+    es.variant,
+    es.priority,
+    es.reporter,
+    es.ts,
+    es.event,
+    es.issue_type,
+    es.resolver,
+    es.report_channel,
+    es.short_description,
+    es.customer_satisfaction
+FROM im.event_stage es
+JOIN batch_keys bk
+    ON bk.event_key = es.event_key
+ON CONFLICT (event_key) DO NOTHING
+RETURNING event_key
 """
 
 
@@ -82,15 +118,26 @@ class LoadStats:
     total_input_rows: int = 0
     total_valid_rows: int = 0
     total_dropped_rows: int = 0
+    total_inserted_rows: int = 0
+    total_duplicate_rows: int = 0
     case_ids: set = field(default_factory=set)
     event_counts: Counter = field(default_factory=Counter)
     min_ts: Optional[pd.Timestamp] = None
     max_ts: Optional[pd.Timestamp] = None
 
-    def update(self, validated_df: pd.DataFrame, input_rows: int, dropped_rows: int) -> None:
+    def update(
+        self,
+        validated_df: pd.DataFrame,
+        input_rows: int,
+        dropped_rows: int,
+        inserted_rows: int,
+        duplicate_rows: int,
+    ) -> None:
         self.total_input_rows += input_rows
         self.total_valid_rows += len(validated_df)
         self.total_dropped_rows += dropped_rows
+        self.total_inserted_rows += inserted_rows
+        self.total_duplicate_rows += duplicate_rows
 
         if validated_df.empty:
             return
@@ -105,13 +152,15 @@ class LoadStats:
         if self.max_ts is None or chunk_max > self.max_ts:
             self.max_ts = chunk_max
 
-    def print_summary(self, dry_run: bool) -> None:
-        total_label = "would_insert" if dry_run else "inserted"
+    def print_summary(self) -> None:
         min_ts_str = self.min_ts.isoformat() if self.min_ts is not None else "n/a"
         max_ts_str = self.max_ts.isoformat() if self.max_ts is not None else "n/a"
 
-        print(f"rows_{total_label}: {self.total_valid_rows}")
+        print(f"rows_input: {self.total_input_rows}")
+        print(f"rows_valid: {self.total_valid_rows}")
         print(f"rows_dropped_invalid: {self.total_dropped_rows}")
+        print(f"rows_inserted: {self.total_inserted_rows}")
+        print(f"rows_duplicate_skipped: {self.total_duplicate_rows}")
         print(f"distinct_case_id_count: {len(self.case_ids)}")
         print(f"min_ts: {min_ts_str}")
         print(f"max_ts: {max_ts_str}")
@@ -178,6 +227,52 @@ def parse_timestamps(series: pd.Series) -> pd.Series:
     return parsed
 
 
+def normalize_text_for_key(value: object) -> str:
+    if pd.isna(value):
+        return ""
+    return str(value).strip()
+
+
+def normalize_timestamp_for_key(value: object) -> str:
+    if pd.isna(value):
+        return ""
+    if not isinstance(value, pd.Timestamp):
+        value = pd.Timestamp(value)
+    if value.tzinfo is None:
+        value = value.tz_localize("UTC")
+    else:
+        value = value.tz_convert("UTC")
+    return value.to_pydatetime().astimezone(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+
+def normalize_csat_for_key(value: object) -> str:
+    if pd.isna(value):
+        return ""
+    try:
+        decimal_value = Decimal(str(value)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    except (InvalidOperation, ValueError):
+        return ""
+    return f"{decimal_value:.2f}"
+
+
+def build_event_key(row: pd.Series) -> str:
+    key_parts = [
+        normalize_text_for_key(row.get("case_id")),
+        normalize_text_for_key(row.get("variant")),
+        normalize_text_for_key(row.get("priority")),
+        normalize_text_for_key(row.get("reporter")),
+        normalize_timestamp_for_key(row.get("ts")),
+        normalize_text_for_key(row.get("event")),
+        normalize_text_for_key(row.get("issue_type")),
+        normalize_text_for_key(row.get("resolver")),
+        normalize_text_for_key(row.get("report_channel")),
+        normalize_text_for_key(row.get("short_description")),
+        normalize_csat_for_key(row.get("customer_satisfaction")),
+    ]
+    digest = hashlib.md5("|".join(key_parts).encode("utf-8"), usedforsecurity=False)
+    return digest.hexdigest()
+
+
 def standardize_and_validate_chunk(
     chunk: pd.DataFrame,
     column_mapping: Dict[str, Optional[str]],
@@ -199,8 +294,9 @@ def standardize_and_validate_chunk(
     )
 
     valid_mask = standardized[REQUIRED_COLUMNS].notna().all(axis=1)
-    valid_mask &= standardized["customer_satisfaction"].notna()
     valid_rows = standardized.loc[valid_mask, TARGET_COLUMNS].copy()
+    valid_rows["event_key"] = valid_rows.apply(build_event_key, axis=1)
+    valid_rows = valid_rows[DB_COLUMNS]
     dropped_rows = int((~valid_mask).sum())
 
     return valid_rows, dropped_rows
@@ -332,13 +428,34 @@ def run(args: argparse.Namespace) -> int:
 
     def process_chunk(chunk: pd.DataFrame, cursor: Optional[psycopg2.extensions.cursor]) -> None:
         validated_df, dropped_rows = standardize_and_validate_chunk(chunk, column_mapping)
-        stats.update(validated_df=validated_df, input_rows=len(chunk), dropped_rows=dropped_rows)
 
-        if cursor is None or validated_df.empty:
+        if cursor is None:
+            stats.update(
+                validated_df=validated_df,
+                input_rows=len(chunk),
+                dropped_rows=dropped_rows,
+                inserted_rows=len(validated_df),
+                duplicate_rows=0,
+            )
             return
 
-        records = dataframe_to_records(validated_df)
-        execute_values(cursor, INSERT_SQL, records, page_size=args.chunksize)
+        inserted_rows = 0
+        duplicate_rows = 0
+        if not validated_df.empty:
+            records = dataframe_to_records(validated_df[DB_COLUMNS])
+            execute_values(cursor, STAGE_INSERT_SQL, records, page_size=args.chunksize)
+            batch_event_keys = list(dict.fromkeys(validated_df["event_key"].astype(str).tolist()))
+            cursor.execute(RAW_INSERT_SQL, (batch_event_keys,))
+            inserted_rows = len(cursor.fetchall())
+            duplicate_rows = len(validated_df) - inserted_rows
+
+        stats.update(
+            validated_df=validated_df,
+            input_rows=len(chunk),
+            dropped_rows=dropped_rows,
+            inserted_rows=inserted_rows,
+            duplicate_rows=duplicate_rows,
+        )
 
     if args.dry_run:
         try:
@@ -349,13 +466,14 @@ def run(args: argparse.Namespace) -> int:
             print(f"FAIL validation: {exc}")
             return 1
 
-        stats.print_summary(dry_run=True)
+        stats.print_summary()
         return 0
 
     try:
         database_url = load_database_url()
         with psycopg2.connect(database_url) as conn:
             with conn.cursor() as cur:
+                cur.execute("TRUNCATE TABLE im.event_stage")
                 if args.truncate:
                     cur.execute("TRUNCATE TABLE im.event_raw")
                     print("OK truncated im.event_raw")
@@ -367,7 +485,7 @@ def run(args: argparse.Namespace) -> int:
         print(f"FAIL database load: {exc}")
         return 1
 
-    stats.print_summary(dry_run=False)
+    stats.print_summary()
     return 0
 
 
