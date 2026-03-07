@@ -1,0 +1,7 @@
+incident_number;process_variant;severity;reported_by;timestamp;event_name;category;assigned_to;channel;summary;csat
+INC100;Standard;High;Ava;2024-01-01 08:00:00;Ticket created;Access;L1;Portal;Password reset;
+INC100;Standard;High;Ava;2024-01-01 08:00:00;Ticket created;Access;L1;Portal;Password reset;
+INC100;Standard;High;Ava;2024-01-01 08:15:00;Ticket solved by level 1 support;Access;L1;Portal;Password reset;
+INC100;Standard;High;Ava;2024-01-01 08:20:00;Ticket closed;Access;L1;Portal;Password reset;
+INC100;Standard;High;Ava;2024-01-01 08:25:00;Customer feedback received;Access;L1;Portal;Password reset;4.50
+
