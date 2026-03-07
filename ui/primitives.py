@@ -62,6 +62,7 @@ def section_header(title: str, description: str, eyebrow: str = "Analysis") -> N
 def metric_strip(metrics: list[dict[str, str]]) -> None:
     if not metrics:
         return
+    st.markdown('<div class="ops-kpi-strip">', unsafe_allow_html=True)
     cols = st.columns(len(metrics))
     for col, metric in zip(cols, metrics):
         with col:
@@ -77,6 +78,7 @@ def metric_strip(metrics: list[dict[str, str]]) -> None:
                 """,
                 unsafe_allow_html=True,
             )
+    st.markdown('</div>', unsafe_allow_html=True)
 
 
 def narrative_callouts(items: Iterable[str]) -> None:

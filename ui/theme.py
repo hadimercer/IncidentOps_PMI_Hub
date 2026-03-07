@@ -192,10 +192,11 @@ def apply_theme() -> None:
       .ops-chip.status-warn {{ background: {TOKENS['warning_soft']}; color: {TOKENS['warning']}; border-color: rgba(233,166,58,0.30); }}
       .ops-filter-shell {{
         position: sticky;
-        top: 4.25rem;
+        top: 5.35rem;
         z-index: 30;
         padding: 0.85rem 1rem 0.3rem 1rem;
-        margin-bottom: 1rem;
+        margin-top: 0.85rem;
+        margin-bottom: 1.15rem;
         border: 1px solid {TOKENS['border']};
         border-radius: {TOKENS['radius_l']};
         background: rgba(9,19,26,0.90);
@@ -217,6 +218,9 @@ def apply_theme() -> None:
       .ops-filter-title .hint {{
         color: {TOKENS['text_soft']};
         font-size: 0.78rem;
+      }}
+      .ops-kpi-strip {{
+        margin: 1.15rem 0;
       }}
       .ops-kpi-card {{
         border: 1px solid {TOKENS['border']};
