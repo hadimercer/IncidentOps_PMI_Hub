@@ -192,7 +192,7 @@ def apply_theme() -> None:
       .ops-chip.status-warn {{ background: {TOKENS['warning_soft']}; color: {TOKENS['warning']}; border-color: rgba(233,166,58,0.30); }}
       .ops-filter-shell {{
         position: sticky;
-        top: 0.5rem;
+        top: 4.25rem;
         z-index: 30;
         padding: 0.85rem 1rem 0.3rem 1rem;
         margin-bottom: 1rem;
@@ -223,7 +223,10 @@ def apply_theme() -> None:
         background: linear-gradient(180deg, rgba(21,43,55,0.96), rgba(13,27,36,0.96));
         border-radius: {TOKENS['radius_l']};
         padding: 1rem 1rem 0.95rem 1rem;
-        min-height: 132px;
+        min-height: 176px;
+        height: 176px;
+        display: flex;
+        flex-direction: column;
         box-shadow: {TOKENS['shadow']};
       }}
       .ops-kpi-card .label {{
@@ -245,9 +248,14 @@ def apply_theme() -> None:
         color: {TOKENS['text_muted']};
         font-size: 0.84rem;
         line-height: 1.45;
+        min-height: 3.65rem;
+        overflow: hidden;
+        display: -webkit-box;
+        -webkit-line-clamp: 3;
+        -webkit-box-orient: vertical;
       }}
       .ops-kpi-card .signal {{
-        margin-top: 0.72rem;
+        margin-top: auto;
         height: 4px;
         border-radius: 999px;
         background: linear-gradient(90deg, rgba(54,194,180,0.12), rgba(54,194,180,0.72));

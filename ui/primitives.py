@@ -200,7 +200,6 @@ def global_filter_bar(*, min_date: date, max_date: date, priorities: list[str], 
     with cols[0]:
         st.date_input(
             "Date range",
-            value=st.session_state["global_date_range"],
             min_value=min_date,
             max_value=max_date,
             key="global_date_range",
